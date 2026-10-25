@@ -1,0 +1,42 @@
+# Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2: CyberConnect2, Unreal Engine 5 (shaders inline in the cooked packages of eleven IoStore containers), SDK 16.2.3, NVN, gRPC, CRI movies;
+# update 1.02 (v131072) with its five DLC.
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (docs/development.md "Game notes"); not tried on the iPhone yet
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	0100AD80208A8000
+program_id	0100AD80208A8000
+
+# ---- App ----
+name	Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2
+ipa	DemonSlayerKimetsuNoYaibaTheHinokamiChronicles2.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.02	main=437c43801a1c9aee25bc83d4e8b18c64	subsdk0=7c1a58cac01c4aa3935c6243f69cf0d3	sdk=835c229763ce5c1816a70f875bd70ccd
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	APK2/Content/Paks/pakchunk0-Switch.ucas
+zip_store	.pak:.ttf:.txt:.ucas:.utoc:.metallib
+
+# ---- Frame rate ----
+# Unreal's UEngine::FixedFrameRate and rhi.SyncInterval written in game memory (hle_fpslock.c, main 1.02; t.MaxFPS is 0 here): 60 fps instead of the game's 30, its fixed delta time 1/60 s
+fps_target	60
+
+# ---- Memory ----
+# Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. An iPhone needs the allocator cut for the build and a capped region (game_args), as Octopath Traveler 0's profile (docs/agents/03)
+mem_reserve	0x1028000000
+mem_alias	0x1008000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 shaders (provisional profile)
