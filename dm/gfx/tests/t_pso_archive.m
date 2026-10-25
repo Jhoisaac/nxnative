@@ -158,7 +158,7 @@ int main(void) { @autoreleasepool {
     same_pixels("from the archive: RGBA8 blended, RGBA16F", MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA16Float, MTLColorWriteMaskAll);
     EXPECT("base from the archive", 1, g_pb_archived);
     EXPECT("no base compiled", built, g_pb_built);
-    // compaction: with more than PSO_ARCH_COMPACT files, the bases the prewarm takes from them are captured again; after the flush that follows, one file holds them and the old ones are gone
+    // compaction: with more than PSO_ARCH_COMPACT files, the bases the prewarm takes from them are compiled again from source, which captures them; after the flush that follows, one file holds them and the old ones are gone
     {
         char cdir[] = "/tmp/t_pso_compact.XXXXXX"; if (!mkdtemp(cdir)) abort();
         NSString *saved = g_arch_dir; g_arch_dir = @(cdir); nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[];
@@ -174,7 +174,7 @@ int main(void) { @autoreleasepool {
         NSMutableArray<id<MTL4Archive>> *open = [NSMutableArray array]; NSMutableArray<NSString *> *paths = [NSMutableArray array];
         for (NSString *n in names.reverseObjectEnumerator) { NSString *f = [@(cdir) stringByAppendingPathComponent:n]; [paths addObject:f]; [open addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:f] error:&err]]; }
         nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = open;   // as a new start with that many files
-        g_compact_opts = [MTL4CompilerTaskOptions new]; g_compact_opts.lookupArchives = open; g_compact_files = paths; g_compacted = 0;
+        g_compact_opts = [MTL4CompilerTaskOptions new]; g_compact_files = paths;   // as pso4_init: no lookup archives, the bases are compiled again from source g_compacted = 0;
         uint64_t arch0 = g_pb_archived, built0 = g_pb_built;
         atomic_store(&g_warm_running, 1);
         for (MTLRenderPipelineDescriptor *cd in descs) pso_build(cd, &err);

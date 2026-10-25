@@ -1033,7 +1033,9 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
     (DM_OODLE_JOB, dm/host/hle_oodle.c: right before nnMain, then the host exits), and the decoded archives go to <version dir>/ue_shaders, where shader_split.py reads them.
     The job runs the packed version's code (Oodle's format does not change between builds). Unreal Engine 4.26 and later compress shaders with LZ4 by default (DRAGON QUEST VII Reimagined),
     which uepak.py decodes itself, so such a game needs no host run here. Unreal Engine 5.6 (FINAL FANTASY RESONANCE) keeps its shader libraries in the IoStore container instead, two layers
-    of Oodle (container blocks, then each shader group): uepak.py reads them through the game's Oodle in the host's tool mode (uepak.OodleHost), with no boot. A folder whose stamp matches its paks is reused"""
+    of Oodle (container blocks, then each shader group): uepak.py reads them through the game's Oodle in the host's tool mode (uepak.OodleHost), with no boot. A game with neither (Demon Slayer
+    -Kimetsu no Yaiba- The Hinokami Chronicles 2: Unreal Engine 5 without shared material shader code) keeps its shaders inline in its cooked packages and global shader cache, taken out the same
+    way (uepak.inline_archives); the host is built and started only for those. A folder whose stamp matches its paks is reused"""
     sys.path.insert(0, str(repo / 'dm/gfx/tools')); import uepak
     todo = {v: d for v, d in dirs.items() if not ((d / 'ue_shaders/stamp').exists() and (d / 'ue_shaders/stamp').read_text() == ue_stamp(d))}
     PROG.stage('UE shader decode')
@@ -1045,17 +1047,18 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
         jd, rd, log = work / f'tmp/ue_job_{v}', work / 'tmp/ue_run', logs / f'ue_decode_{v}.log'
         rmtree(jd); rmtree(rd)
         for s in ('save', 'temp'): (rd / s).mkdir(parents=True)
-        dec = None
-        if uepak.io_shader_tocs(str(d / 'RomFS')):
+        def start():   # the game's Oodle, for IoStore shader libraries and inline shaders (uepak.job calls it only for those)
+            nonlocal host
             if not host:
                 PROG.set(step='building the Mac host')
                 host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
-            dec = uepak.OodleHost(host, patched, env)
-        PROG.set(step=f'{v}: shader archives out of the paks' + (' and IoStore containers' if dec else ''))
+                PROG.set(step=f'{v}: shaders out of the paks and IoStore containers')
+            return uepak.OodleHost(host, patched, env)
+        dec = uepak.Lazy(start)
+        PROG.set(step=f'{v}: shaders out of the paks and IoStore containers')
         try: listing, n = uepak.job(str(d / 'RomFS'), str(d / 'ExeFS/main'), str(jd), decode=dec)
-        finally:
-            if dec: dec.close()
-        if not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {d / "RomFS"} holds a shader code archive: where the shaders are has to be found first')
+        finally: dec.close()
+        if not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {d / "RomFS"} holds a shader code archive, an IoStore shader library or shaders inline in its cooked data: where the shaders are has to be found first')
         say(f'{v}: ' + '; '.join(f'{x["name"]} {x["shaders"]:,} shaders' + (f' ({x["compression"]})' if x.get('compression') else '') for x in listing)
             + (f'; decoding {n:,} with the game\'s Oodle in the Mac host' if n else ''))
         if n:   # Oodle-compressed shaders (Octopath Traveler 0); LZ4 ones (Unreal Engine 4.26 and later by default) are decoded by uepak.py already
@@ -1071,7 +1074,7 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
                 raise BuildError(f'the Oodle decode run stopped with exit {rc} (host output: {log})')
         out = d / 'ue_shaders.partial'; rmtree(out)
         uepak.finish(str(jd), str(out)); (out / 'stamp').write_text(ue_stamp(d))
-        swap_in(out, d / 'ue_shaders'); rmtree(jd); rmtree(rd); total += n + sum(x['shaders'] for x in listing if x['compression'] == 'IoStore, decoded')
+        swap_in(out, d / 'ue_shaders'); rmtree(jd); rmtree(rd); total += n + sum(x['shaders'] for x in listing if x['compression'].endswith(', decoded'))
     PROG.end(f'{total:,} shaders in {hms(time.time() - t0)}')
 
 

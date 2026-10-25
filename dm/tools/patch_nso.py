@@ -258,17 +258,28 @@ def site_br_call(ins):
     emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, 'K18'); emit(LDRX(16, 16)); emit(BR(16))
     return start
 
+def emit_slot_copy(src, dst):
+    """Thread slot dst = thread slot src, through x16 / x17 saved in the red zone (the value waits at sp-24 while x16 serves for the second key page offset)"""
+    emit(STP(16, 17, 31, -16)); emit(MRS_TPIDRRO(17)); emit_slot_addr(17, 16, src); emit(LDRX(16, 17)); emit(STUR(16, 31, -24))
+    emit(MRS_TPIDRRO(17)); emit_slot_addr(17, 16, dst); emit(LDUR(16, 31, -24)); emit(STRX(16, 17)); emit(LDP(16, 17, 31, -16))
+
 def site_sysreg_read(ins, kind):
-    """mrs xN, tpidr_el0 / tpidrro_el0 → xN = thread slot value."""
+    """mrs xN, tpidr_el0 / tpidrro_el0 → xN = thread slot value. Into x18, the value goes to thread slot K18, where every x18 site reads the guest's x18 (Demon Slayer -Kimetsu no Yaiba-
+    The Hinokami Chronicles 2 main+0x23f5ef0, Unreal Engine 5: mrs x18, tpidr_el0, then ldr w8,[x18,x0] for a thread_local; written to the real x18, the load read whatever K18 held, 0x33200,
+    and the RHI thread crashed after the shader libraries loaded)"""
     N = ins.bytes[0] & 31
     tmp = 16 if N != 16 else 17
     start = here()
-    emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(N)); emit_slot_addr(N, tmp, kind); emit(LDRX(N, N)); emit(LDUR(tmp, 31, -16))   # tmp is saved by borrowing the red zone
+    if N == 18: emit_slot_copy(kind, 'K18')
+    else: emit(STUR(tmp, 31, -16)); emit(MRS_TPIDRRO(N)); emit_slot_addr(N, tmp, kind); emit(LDRX(N, N)); emit(LDUR(tmp, 31, -16))   # tmp is saved by borrowing the red zone
     emit(B(here(), ins.address + 4))
     return start
 
 def site_tpidr_write(ins):
     N = struct.unpack('<I', ins.bytes)[0] & 31
+    if N == 18:   # msr tpidr_el0, x18: the guest's x18 is thread slot K18, as for the read above
+        start = here(); emit_slot_copy('K18', 'KTLS'); emit(B(here(), ins.address + 4))
+        return start
     (T,) = pick({N}, 1)
     start = here()
     emit(0xF81F0000 | (31 << 5) | T)           # stur xT,[sp,#-16]

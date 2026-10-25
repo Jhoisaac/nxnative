@@ -177,9 +177,13 @@ static OSStatus au_create(aout *a) {
                                      .mChannelsPerFrame = ch, .mBitsPerChannel = 16};
     AURenderCallbackStruct cb = {au_render, a};
 #if !TARGET_OS_IPHONE
-    { const char *e = getenv("DM_DBG_AU_FRAMES"); if (e) {   // diagnostic: on the Mac, make the sound card callback ask N frames each time (1024 = the iOS default, reproduces the crackling)
-        UInt32 fr = (UInt32)atoi(e); OSStatus st = AudioUnitSetProperty(a->au, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0, &fr, sizeof fr);
-        LOG("audio device buffer frame count set to %u: status %d", fr, (int)st); } }
+    // The device calls back with 240 frames (5 ms, the audout service's period on the Switch), as front_ios.m asks of the iOS session: a game keeps only a few 5 ms blocks in flight and a
+    // block is released only once played, so a longer callback finds too little queued. CRI ADX2's 6-channel output (Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2) keeps
+    // 3 × 240 frames; the Mac's default 512-frame callback came up 16 frames short every 8th callback (250 underruns in 2000, a click every 85 ms). DM_DBG_AU_FRAMES=<n> asks n instead
+    // (1024 = the iOS default, reproduces the crackling)
+    { const char *e = getenv("DM_DBG_AU_FRAMES"); UInt32 fr = e ? (UInt32)atoi(e) : RATE / 200;
+      OSStatus st = AudioUnitSetProperty(a->au, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0, &fr, sizeof fr);
+      if (e || st) LOG("%saudio device buffer frame count set to %u: status %d", st ? "[RED] " : "", fr, (int)st); }
 #endif
     OSStatus st = AudioUnitSetProperty(a->au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof f);
     if (!st) st = AudioUnitSetProperty(a->au, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb);

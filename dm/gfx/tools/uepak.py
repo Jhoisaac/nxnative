@@ -9,6 +9,9 @@
 # Unreal Engine 5.6 (FINAL FANTASY RESONANCE) has no shader code archive in its pak (FFRS-Switch.pak holds configs only): the cooker converted both libraries into its IoStore container
 #   (FFRS-Switch.utoc / .ucas, Oodle in 64 KB blocks, not encrypted) as one ShaderCodeLibrary chunk each (the tables) and one ShaderCode chunk per group of shaders, every group Oodle-compressed
 #   on its own (Toc, io_archive). Both layers need the game's decoder, which runs in the Mac host's tool mode (OodleHost); the libraries come out as version 2 archives with every shader decoded.
+# Unreal Engine 5 without shared material shader code (Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2) has neither: each shader map is inline in its cooked package's exports
+#   (ExportBundleData chunks of eleven IoStore containers) and the engine's in Engine/GlobalShaderCache-SP_GLSL_SWITCH.bin of pakchunk0-Switch.pak, every shader one Oodle stream; they are
+#   found by scanning (inline_shaders), decoded through the same OodleHost and written as version 2 archives too (inline_archives: 2,854 + 113,444 shaders).
 # The AES key is in main (Unreal embeds it): the 32-byte window of main's read-only or data segment that decrypts the index start to its mount point ("../../../"; Octopath Traveler 0: one window of
 #   116,287 tried). It is only kept in memory, never printed or written.
 # Pak footer (version 11, the last 0xdd bytes): encryption key GUID (16), encrypted index flag (u8), magic 0x5A6F12E1, version (u32), index offset (u64), index size (u64), index SHA-1 (20),
@@ -32,7 +35,7 @@
 #        uepak.py job <RomFS> <main NSO> <work dir> [<Mac host> <rewritten modules>]   the shader code archives of every pak, and an Oodle job of their Oodle-compressed shaders (LZ4 ones
 #                                                                       decoded at once); IoStore shader libraries (UE 5.6) decoded at once through the game's Oodle in the host (OodleHost)
 #        uepak.py finish <work dir> <out dir>                           after the host has run the job: the archives with every shader decoded
-import ctypes, json, os, struct, sys
+import ctypes, json, os, re, struct, sys
 
 PAK_MAGIC, ARCHIVE_VERSION = 0x5A6F12E1, 2
 JOB_MAGIC, OUT_MAGIC = 0x4a4f4d44, 0x524f4d44   # "DMOJ", "DMOR" (hle_oodle.c)
@@ -368,6 +371,72 @@ def io_archive(toc, i, decode):
     out += struct.pack('<I', 0) + struct.pack(f'<I{len(idx)}I', len(idx), *idx)
     return bytes(out) + b''.join(code)
 
+IO_EXPORT_BUNDLE = 1   # EIoChunkType ExportBundleData in Unreal Engine 5: a cooked package's exports
+OODLE_HEAD, LSLG_AT = re.compile(b'[\x8c\xcc][\x06\x0a\x0b\x0c]'), re.compile(b'LSLG')   # an Oodle stream's first block header (Kraken, Mermaid, Selkie or Leviathan); a stored record
+TAG_FREQ = {'SV': 0, 'SH': 1, 'SD': 2, 'SP': 3, 'SG': 4, 'SC': 5}   # LSLG stage tag → EShaderFrequency
+
+def inline_shaders(d, decode):
+    """Shaders kept inline in cooked Unreal Engine 5 data, when the project does not share material shader code (Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2: no shader code
+    archive and no IoStore shader library; each material's shader map in its package's exports, the engine's in Engine/GlobalShaderCache-SP_GLSL_SWITCH.bin, 2,854 shaders). A shader map's code
+    (FShaderMapResourceCode) lists its shaders as entries {byte array (i32 length, then the bytes), i32 raw size, u8 frequency}; the bytes are one Oodle stream (Mermaid, 8C 0A), or the record
+    itself when that is no larger. Found by the stream's header with the length in front of it: an entry whose bytes the game's decoder takes to exactly its raw size, an LSLG record whose stage
+    tag is its frequency (a false match fails the decode: the host answers 0 and goes on). → [(frequency, record)]"""
+    out = []
+    def take(s, fr):
+        try: ok = s[:4] == b'LSLG' and TAG_FREQ.get(s[4:6].decode('latin1')) == fr and lslg(s)
+        except struct.error: ok = False   # shorter than the record's layout
+        if ok: out.append((fr, s))
+    for m in OODLE_HEAD.finditer(d, 4):
+        i = m.start(); n = int.from_bytes(d[i - 4:i], 'little')
+        if not 2 <= n <= len(d) - i - 5: continue
+        raw, fr = struct.unpack_from('<iB', d, i + n)
+        if not n < raw < 1 << 24 or fr > 5: continue
+        try: take(decode(d[i:i + n], raw), fr)
+        except ValueError: pass
+    for m in LSLG_AT.finditer(d, 4):
+        i = m.start(); n = int.from_bytes(d[i - 4:i], 'little')
+        if 2 <= n <= len(d) - i - 5 and struct.unpack_from('<i', d, i + n)[0] == n: take(d[i:i + n], d[i + n + 4])
+    return out
+
+def made_archive(shaders):
+    """A version 2 shader code archive of decoded shaders [(frequency, record)], the form the shader tools read: no shader maps, each shader's hash its SHA-1"""
+    import hashlib
+    out = bytearray(struct.pack('<III', ARCHIVE_VERSION, 0, len(shaders)))
+    for _, s in shaders: out += hashlib.sha1(s).digest()
+    out += struct.pack('<II', 0, len(shaders)); off = 0
+    for fr, s in shaders: out += struct.pack('<QIIB', off, len(s), len(s), fr); off += len(s)
+    return bytes(out + struct.pack('<II', 0, 0)) + b''.join(s for _, s in shaders)
+
+def inline_archives(romfs, work, paks, key, decode):
+    """The shaders kept inline (inline_shaders) as version 2 archives in <work>/archives, every shader once: the engine's global shader caches (GlobalShaderCache-<format>.bin in a pak, one
+    archive each, ShaderArchive-Global-<format>) and the cooked packages of every IoStore container (ExportBundleData chunks, ShaderArchive-Packages). → their listing (job)"""
+    seen, listing = set(), []   # every shader once: many materials share shaders
+    def new(shaders):
+        out = [x for x in shaders if x[1] not in seen]; seen.update(s for _, s in out); return out
+    def put(name, src, path, shaders):
+        if not shaders: return
+        open(os.path.join(work, 'archives', name), 'wb').write(made_archive(shaders))
+        listing.append(dict(name=name, pak=os.path.relpath(src, romfs), path=path, shaders=len(shaders), compressed=0, compression='inline, decoded'))
+    for p in paks:
+        for path in sorted(x for x in p.files if re.fullmatch(r'GlobalShaderCache-.+\.bin', os.path.basename(x))):
+            fmt = os.path.basename(path)[len('GlobalShaderCache-'):-len('.bin')]
+            put(f'ShaderArchive-Global-{fmt}.ushaderbytecode', p.path, path, new(inline_shaders(p.read(path, decode), decode)))
+    found, tocs = [], sorted(os.path.join(dp, f) for dp, _, fs in os.walk(romfs) for f in fs if f.endswith('.utoc'))
+    for tp in tocs:
+        t = Toc(tp, key)
+        for i in t.of_type(IO_EXPORT_BUNDLE): found += new(inline_shaders(t.read(i, decode), decode))
+    put('ShaderArchive-Packages.ushaderbytecode', os.path.dirname(tocs[0]) if tocs else romfs, 'ExportBundleData chunks', found)
+    return listing
+
+class Lazy:
+    """A decoder started at its first call (start() → the decoder, e.g. an OodleHost): the NSP script builds and starts the Mac host only when a game's files need the game's decoder"""
+    def __init__(self, start): self.start, self.dec = start, None
+    def __call__(self, comp, n):
+        if not self.dec: self.dec = self.start()
+        return self.dec(comp, n)
+    def close(self):
+        if self.dec: self.dec.close()
+
 def io_shader_tocs(romfs):
     """The IoStore containers under the RomFS that hold Unreal Engine 5 shader libraries"""
     out = []
@@ -406,9 +475,10 @@ def unreal_paks(romfs, legacy=None):
 def job(romfs, main_nso, work, decode=None):
     """The shader code archives of every pak under the RomFS into <work>/archives, and one Oodle job (<work>/oodle.job) of every compressed shader in them; <work>/job.json lists them.
     The shader libraries of IoStore containers (Unreal Engine 5.6, FINAL FANTASY RESONANCE: no archive in the pak) go there already decoded: their container blocks and shader groups are
-    Oodle-compressed, two layers, so they need decode (OodleHost: the game's decoder over a pipe) rather than the job"""
+    Oodle-compressed, two layers, so they need decode (OodleHost: the game's decoder over a pipe) rather than the job. With neither (Unreal Engine 5 without shared material shader code, Demon
+    Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2) the shaders are inline in the cooked data, taken out through decode as well (inline_archives)"""
     os.makedirs(os.path.join(work, 'archives'), exist_ok=True)
-    img, lo, hi = nso_image(main_nso); key = None; listing, recs = [], []
+    img, lo, hi = nso_image(main_nso); key = None; listing, recs, opened = [], [], []
     tocs = io_shader_tocs(romfs)
     if tocs and not decode: raise ValueError(f'{tocs[0]}: IoStore shader libraries need the game\'s decoder (decode)')
     names = archive_names(romfs)
@@ -423,7 +493,7 @@ def job(romfs, main_nso, work, decode=None):
         if enc and key is None:
             key = find_key(img, lo, hi, pak)
             if key is None: raise ValueError(f'{pak}: the index is encrypted and no window of main decrypts it')
-        p = Pak(pak, key)
+        p = Pak(pak, key); opened.append(p)
         for path in sorted(x for x in p.files if x.endswith('.ushaderbytecode')):
             b = p.read(path); a = archive(b); name = os.path.basename(path)
             comp = [i for i, (_, size, raw, _) in enumerate(a['shaders']) if size != raw]
@@ -434,6 +504,9 @@ def job(romfs, main_nso, work, decode=None):
             for i in comp:
                 off, size, raw, _ = a['shaders'][i]; recs.append((name, i, b[a['code'] + off:a['code'] + off + size], raw))
             listing.append(dict(name=name, pak=os.path.relpath(pak, romfs), path=path, shaders=len(a['shaders']), compressed=len(comp), compression=how))
+    if not listing:
+        if not decode: raise ValueError(f'{romfs}: no shader code archive or IoStore shader library, and the shaders kept inline need the game\'s decoder (decode)')
+        listing = inline_archives(romfs, work, opened, key, decode)
     with open(os.path.join(work, 'oodle.job'), 'wb') as f:
         f.write(struct.pack('<II', JOB_MAGIC, len(recs)))
         for _, _, c, raw in recs: f.write(struct.pack('<II', len(c), raw)); f.write(c)

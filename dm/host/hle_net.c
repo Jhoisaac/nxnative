@@ -36,13 +36,48 @@ static int sk_fail(void) { t_skerr = SK_ENETDOWN; return -1; }
 // on Poll(fds, 0, 33 ms), 11,000 calls a second. An endless wait on nothing never returns on hardware; here it returns 0 after 100 ms: a thread in a host hook pauses for a garbage
 // collector (IL2CPP's, hle_thread.c) only once the hook returns, and the caller can still see a shutdown
 void dm_guest_sleep_ns(int64_t ns);
+int dm_detclock_enabled(void);
 static int sk_idle(int64_t ms) { dm_guest_sleep_ns((ms < 0 ? 100 : ms) * 1000000); return 0; }
+
+// Event descriptors (nn::socket::EventFd, SDK 13 and later) need no network: a counter the bsd service keeps, as FreeBSD's eventfd. gRPC wakes its pollers with one (Demon Slayer -Kimetsu
+// no Yaiba- The Hinokami Chronicles 2, Unreal Engine 5: its poll engine takes only EventFd(0, 6) as wakeup descriptor; when it failed, grpc_init found no event engine and called abort,
+// main+0x6ae944). So the host keeps them itself: write adds to the counter, read takes it (or 1 with EFD_SEMAPHORE) and fails with EAGAIN at 0 when non-blocking, Poll reports them readable
+// above 0 and writable always. Every other descriptor still fails as above
+enum { SK_EFD_BASE = 0x100, SK_EFD_N = 64, SK_EFD_SEMAPHORE = 1, SK_EFD_NONBLOCK = 4, SK_EAGAIN = 35 };   // FreeBSD's flags and error code
+static struct { int used, flags; uint64_t count; } g_efd[SK_EFD_N];
+static pthread_mutex_t g_efd_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_efd_cv = PTHREAD_COND_INITIALIZER;
+static int efd_index(int fd) { int i = fd - SK_EFD_BASE; return i >= 0 && i < SK_EFD_N && g_efd[i].used ? i : -1; }   // under g_efd_mu
+static int efd_wait(uint64_t dl) {   // under g_efd_mu: until a write (or a close) or the deadline (now_ns); 0 at the deadline
+    if (dm_detclock_enabled()) {   // the guest clock: sleep in steps of 1 ms, as dm_guest_sleep_ns does
+        pthread_mutex_unlock(&g_efd_mu); dm_guest_sleep_ns(1000000); pthread_mutex_lock(&g_efd_mu);
+        return now_ns() < dl;
+    }
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t left = dl > now_ns() ? dl - now_ns() : 0, t = (uint64_t)ts.tv_nsec + left % 1000000000u;
+    ts.tv_sec += (time_t)(left / 1000000000u + t / 1000000000u); ts.tv_nsec = (long)(t % 1000000000u);
+    pthread_cond_timedwait(&g_efd_cv, &g_efd_mu, &ts);
+    return now_ns() < dl;
+}
 typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
+enum { SK_POLLIN = 1, SK_POLLOUT = 4, SK_POLLRDNORM = 0x40, SK_POLLWRNORM = 4 };
 int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain pollfd form
-    sk_pollfd *p = fds;
-    for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) return sk_fail();
-    for (uint64_t i = 0; i < n; i++) p[i].revents = 0;
-    return sk_idle(ms);
+    sk_pollfd *p = fds; int efds = 0;
+    pthread_mutex_lock(&g_efd_mu);
+    for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) { if (efd_index(p[i].fd) < 0) { pthread_mutex_unlock(&g_efd_mu); return sk_fail(); } efds = 1; }
+    if (!efds) { pthread_mutex_unlock(&g_efd_mu); for (uint64_t i = 0; i < n; i++) p[i].revents = 0; return sk_idle(ms); }
+    uint64_t dl = now_ns() + (uint64_t)(ms < 0 ? 100 : ms) * 1000000u;   // an endless wait returns after 100 ms, as above
+    for (;;) {
+        int ready = 0;
+        for (uint64_t i = 0; i < n; i++) {
+            int k = p[i].fd >= 0 ? efd_index(p[i].fd) : -1; p[i].revents = 0;
+            if (k < 0) continue;
+            if (g_efd[k].count) p[i].revents |= p[i].events & (SK_POLLIN | SK_POLLRDNORM);
+            if (g_efd[k].count < UINT64_MAX - 1) p[i].revents |= p[i].events & (SK_POLLOUT | SK_POLLWRNORM);
+            ready += p[i].revents != 0;
+        }
+        if (ready || !ms || !efd_wait(dl)) { pthread_mutex_unlock(&g_efd_mu); return ready; }
+    }
 }
 int dm_sk_select(int nfds, const uint64_t *r, const uint64_t *w, const uint64_t *e, const int64_t *tv) {   // fd_set: 1024 bits; timeval: {i64 seconds, i64 microseconds}
     const uint64_t *sets[3] = {r, w, e};
@@ -54,17 +89,61 @@ SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, un
 SKF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { (void)s; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { (void)s; return sk_fail(); }
+static int efd_close(int s);
+HLE_FORCE("_ZN2nn6socket5CloseEi", "bsd socket service (cut): closes the host's event descriptors, else -1/ENETDOWN", int, h_sk_Close, int s) { return efd_close(s) ? 0 : sk_fail(); }
 SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c) { (void)s; (void)c; return sk_fail(); }
+static int efd_fcntl(int s, int c, int v);
+HLE_FORCE("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", "bsd socket service (cut): F_GETFL / F_SETFL on the host's event descriptors, else -1/ENETDOWN", int, h_sk_Fcntl, int s, int c, int v) { return efd_fcntl(s, c, v); }
 SKF("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_sk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
 SKF("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
-SKF("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", h_sk_EventFd, unsigned long v, int f) { (void)v; (void)f; return sk_fail(); }
-SKF("_ZN2nn6socket11EventFdReadEiPm", h_sk_EventFdRead, int s, unsigned long *v) { (void)s; (void)v; return sk_fail(); }
-SKF("_ZN2nn6socket12EventFdWriteEim", h_sk_EventFdWrite, int s, unsigned long v) { (void)s; (void)v; return sk_fail(); }
+HLE_FORCE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", "event descriptor kept by the host (no network needed): a new counter", int, h_sk_EventFd, unsigned long v, int f) {
+    pthread_mutex_lock(&g_efd_mu);
+    for (int i = 0; i < SK_EFD_N; i++) if (!g_efd[i].used) { g_efd[i].used = 1; g_efd[i].flags = f; g_efd[i].count = v; pthread_mutex_unlock(&g_efd_mu); return SK_EFD_BASE + i; }
+    pthread_mutex_unlock(&g_efd_mu);
+    LOG("[RED] nn::socket::EventFd: all %d event descriptors in use", SK_EFD_N);
+    return sk_fail();
+}
+HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm", "event descriptor kept by the host: takes the counter (1 with EFD_SEMAPHORE); at 0 EAGAIN when non-blocking, else waits", int, h_sk_EventFdRead, int s, unsigned long *v) {
+    pthread_mutex_lock(&g_efd_mu);
+    for (;;) {
+        int k = efd_index(s);
+        if (k < 0 || !v) { pthread_mutex_unlock(&g_efd_mu); return sk_fail(); }
+        if (g_efd[k].count) {
+            uint64_t take = g_efd[k].flags & SK_EFD_SEMAPHORE ? 1 : g_efd[k].count;
+            g_efd[k].count -= take; *v = take; pthread_cond_broadcast(&g_efd_cv); pthread_mutex_unlock(&g_efd_mu); return 0;
+        }
+        if (g_efd[k].flags & SK_EFD_NONBLOCK) { pthread_mutex_unlock(&g_efd_mu); t_skerr = SK_EAGAIN; return -1; }
+        efd_wait(now_ns() + 100000000u);
+    }
+}
+HLE_FORCE("_ZN2nn6socket12EventFdWriteEim", "event descriptor kept by the host: adds to the counter and wakes its pollers", int, h_sk_EventFdWrite, int s, unsigned long v) {
+    pthread_mutex_lock(&g_efd_mu);
+    int k = efd_index(s);
+    if (k < 0 || v == UINT64_MAX || g_efd[k].count > UINT64_MAX - 1 - v) {   // a full counter: EAGAIN when non-blocking (the host does not wait for a reader)
+        if (k >= 0) t_skerr = SK_EAGAIN;
+        pthread_mutex_unlock(&g_efd_mu); return k < 0 ? sk_fail() : -1;
+    }
+    g_efd[k].count += v; pthread_cond_broadcast(&g_efd_cv); pthread_mutex_unlock(&g_efd_mu);
+    return 0;
+}
+enum { SK_F_GETFL = 3, SK_F_SETFL = 4, SK_O_NONBLOCK = 4 };   // FreeBSD's
+static int efd_fcntl(int s, int c, int v) {   // fcntl is variadic: the third argument arrives in the third register
+    pthread_mutex_lock(&g_efd_mu);
+    int k = efd_index(s), r = -1;
+    if (k >= 0 && c == SK_F_GETFL) r = g_efd[k].flags & SK_EFD_NONBLOCK ? SK_O_NONBLOCK : 0;
+    else if (k >= 0 && c == SK_F_SETFL) { g_efd[k].flags = (g_efd[k].flags & ~SK_EFD_NONBLOCK) | (v & SK_O_NONBLOCK ? SK_EFD_NONBLOCK : 0); r = 0; }
+    pthread_mutex_unlock(&g_efd_mu);
+    return k < 0 ? sk_fail() : r;
+}
+static int efd_close(int s) {   // 1 when s was an event descriptor (now closed)
+    pthread_mutex_lock(&g_efd_mu);
+    int k = efd_index(s); if (k >= 0) { g_efd[k].used = 0; g_efd[k].count = 0; pthread_cond_broadcast(&g_efd_cv); }
+    pthread_mutex_unlock(&g_efd_mu);
+    return k >= 0;
+}
 SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
 SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { (void)o; return sk_fail(); }
 HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "bsd socket service (cut)", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; return sk_fail(); }

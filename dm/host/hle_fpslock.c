@@ -41,6 +41,15 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
     // (BaseSwitchDeviceProfiles.ini). Registered at main+0x33a4dec (float, IConsoleManager slot 2; AsVariableFloat stored at +0x10) and main+0x149e0bc (int, slot 1; AsVariableInt at +0x10)
     { "84e182f72ee1da4f477804bd05b54c15", "Unreal t.MaxFPS", 0x8c29af0 + 0x10, 0, FPS_F32, 2 },
     { "84e182f72ee1da4f477804bd05b54c15", "Unreal rhi.SyncInterval", 0x8adca10 + 0x10, 0, VSYNCS_I32, 2 },
+    // Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 1.02 (v131072): Unreal Engine 5's t.MaxFPS and rhi.SyncInterval, the same layout (names in UTF-16). The game asks for
+    // present interval 2 (rhi.SyncInterval 2) and plays at 30. Registered at main+0x412d3d0 (float, IConsoleManager slot 2, default 0; AsVariableFloat stored at +0x10, main+0x412d418)
+    // and main+0x1d32ee4 (int, slot 1, default 1; AsVariableInt at +0x10, main+0x1d32f28); the other references to "rhi.SyncInterval" are FindConsoleVariable calls (slot 0xb8).
+    // t.MaxFPS stays 0 here (no limit): the game's DefaultEngine.ini sets bUseFixedFrameRate=True and FixedFrameRate=30, so UEngine steps every frame by 1 / FixedFrameRate and waits
+    // to hold that rate. FixedFrameRate is a float at GEngine+0xaf8 (its reflection params at main+0x9d703d8: name "FixedFrameRate", offset 0xaf8; bUseFixedFrameRate is bit 0x40 of
+    // +0xaf4, SetBit main+0x31997dc), GEngine at main+0xcd23388 (77 reads of its +0xaf4); 60 there steps the game by 1/60 and the RHI presents at interval 1
+    { "437c43801a1c9aee25bc83d4e8b18c64", "Unreal t.MaxFPS", 0xcd22ff0 + 0x10, 0, FPS_F32, 2 },
+    { "437c43801a1c9aee25bc83d4e8b18c64", "Unreal rhi.SyncInterval", 0xcbfb958 + 0x10, 0, VSYNCS_I32, 2 },
+    { "437c43801a1c9aee25bc83d4e8b18c64", "Unreal UEngine::FixedFrameRate", 0xcd23388, 0xaf8, FPS_F32, 1 },
     // Luigi's Mansion 3 1.4.0: Next Level Games' frame limiter. At the end of each frame the main thread calls the frame callbacks (main+0xb7c308) with the milliseconds since the frame
     // started; the limiter (main+0x7a3e70) runs jobs or sleeps until 33.333 ms have passed, the float at main+0x13c94dc (read only there, at main+0x7a3ea8 and main+0x7a3f18), and the game
     // steps by the time that really passed. The game asks for present interval 2 too, which the profile's present_interval display ignores; both are needed

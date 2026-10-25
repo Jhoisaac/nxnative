@@ -645,8 +645,9 @@ static void *g_sub_pool;
 static int tbdr_on(void);
 
 static uint64_t g_sub_serial;   // Submission index (used by the parallel precompile's 'predict only once per submission')
+static void tbal_reset(void);   // the aligned texture buffer copies of the last submission (see tbal_sync)
 void mtl_sub_begin(void) {
-    mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
+    mtl_init(); tbal_reset(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
     defer_drain();
     defer_reset();
     warm_claim();
@@ -683,6 +684,8 @@ void mtl_sub_begin(void) {
 }
 
 static void rp_end(void);
+static int tbal_offset_ok(void);   // whether this GPU reads texture buffer views below the 16-byte alignment right (see tbal_sync)
+static int g_tbal_any;
 // DM_NVN_PASSGPU_SERIAL=1 (for measurement): before creating each encoder on the main command buffer, encode 'signal n+1 → wait for signal n+1' - the signal is only raised once all prior work has completed,
 // so the following encoder starts only after the previous one has fully finished; on TBDR passes no longer overlap in the pipeline, and the per-pass start-to-end span of DM_NVN_PASSGPU is that pass's exclusive time (the whole-frame total is inflated; look only at relative cost)
 static void ser_gate(void) {
@@ -2067,12 +2070,14 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         if (!t->mem || !mtl_addr((uint64_t)t->mem, (uint64_t)t->d.width * bpb, &mb, &mo)) { RED_ONCE(37, "buffer texture storage is not in a memory pool"); return nil; }
         id<MTLBuffer> b = (__bridge id<MTLBuffer>)mb;
         NSUInteger al = [g_dev minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)pf];
-        // Metal reports a 16-byte alignment for texture buffer views (minimumTextureBufferAlignmentForPixelFormat), but on an Apple GPU a view at any offset that is a multiple of the element
-        // size reads the right elements (measured on an M6: R32Float views at offsets 4, 8 and 12, all 64 elements right). Unreal puts some buffer textures at 8-byte offsets in its pools
-        // (Octopath Traveler 0: offset 0x168), which used to be left as dummies. Below the element size the view stays a dummy
+        // Metal reports a 16-byte alignment for texture buffer views (minimumTextureBufferAlignmentForPixelFormat). An M6 reads the right elements at any offset that is a multiple of the
+        // element size (R32Float views at offsets 4, 8 and 12, all 64 elements right); an M4 Pro reads from the offset rounded down to 16. Unreal puts some buffer textures at 4- and 8-byte
+        // offsets in its pools (Octopath Traveler 0: offset 0x168), which used to be left as dummies. The view is made here either way; where tbal_offset_ok finds this GPU reads it shifted,
+        // each draw / dispatch binds an aligned copy instead (tbal_sync). Below the element size the view stays a dummy
         if (mo % al) {
             if (mo % (uint64_t)bpb) { RED_ONCE(38, "buffer texture offset %#llx not aligned to its %d-byte elements", (unsigned long long)mo, bpb); return nil; }
-            static int once; if (!once++) MLOG("buffer texture at pool offset %#llx, below Metal's reported %lu-byte alignment: created there (element-aligned views read correctly on Apple GPUs)", (unsigned long long)mo, (unsigned long)al);
+            static int once; if (!once++) MLOG("buffer texture at pool offset %#llx, below Metal's reported %lu-byte alignment: created there%s", (unsigned long long)mo, (unsigned long)al, tbal_offset_ok() ? "" : "; bound as an aligned copy (tbal)");
+            g_tbal_any = 1;
         }
         MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:(MTLPixelFormat)pf width:t->d.width resourceOptions:b.resourceOptions
                                                                                          usage:MTLTextureUsageShaderRead | (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE ? MTLTextureUsageShaderWrite : 0)];
@@ -2132,11 +2137,12 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     snprintf(avail, sizeof avail, "%llu MB", (unsigned long long)(os_proc_available_memory() >> 20));
 #endif
     MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, avail);
-    { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf;
-      mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf);
+    { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *), mtl_tbal_stats(uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, ac, as, am;
+      mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf); mtl_tbal_stats(&ac, &as, &am);
       MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed "
-           "(tbuf_as_2d); texture type mismatches no view bridges %llu in total (tex_mis_note)",
-           vn, (unsigned long long)vh, (unsigned long long)vm, (unsigned long long)tb, (unsigned long long)tm, (unsigned long long)tf, (unsigned long long)mtl_tex_mis_count()); }
+           "(tbuf_as_2d); texture type mismatches no view bridges %llu in total (tex_mis_note); misaligned texture buffers bound as aligned copies %llu, render passes split for them %llu, left shifted %llu (tbal)",
+           vn, (unsigned long long)vh, (unsigned long long)vm, (unsigned long long)tb, (unsigned long long)tm, (unsigned long long)tf, (unsigned long long)mtl_tex_mis_count(),
+           (unsigned long long)ac, (unsigned long long)as, (unsigned long long)am); }
     if (g_allocprof > 0) { char ab[256]; int o = 0; for (int i = 0; i < g_alloc_n && o < 200; i++) o += snprintf(ab + o, sizeof ab - o, " #%d %llu MB", i, (unsigned long long)(g_alloc4[i].allocatedSize >> 20));
         for (int i = 0; i < 3 && o < 240; i++) o += snprintf(ab + o, sizeof ab - o, " up%d %llu pres%d %llu", i, (unsigned long long)(g_up_alloc4[i].allocatedSize >> 20), i, (unsigned long long)(g_present_alloc4[i].allocatedSize >> 20));
         MLOG("command allocator usage:%s", ab);
@@ -4343,9 +4349,11 @@ static dispatch_queue_t g_arch_q; static _Atomic int g_arch_new, g_arch_sched;
 // (-[_MTLBinaryArchive newArchiverIdWithBinaryKey:...]). Specializations and archive lookups do not take it (they capture nothing)
 static pthread_rwlock_t g_arch_rw = PTHREAD_RWLOCK_INITIALIZER;
 // Compaction: every start writes a file or more (each flush captures only what is new; Breath of the Wild 5-7 per start), and each file a base is not in costs a lookup about
-// 0.06 ms. With more than PSO_ARCH_COMPACT files, the bases the prewarm takes from them are taken through the compiler with those files as its lookup archives, which captures them
-// again, so the flush after the prewarm writes them into one file; the old files are then removed (open archives stay usable for the rest of the run). Bases the prewarm did not
-// take (pso_user.tsv never named them) go with them and are built again when drawn
+// 0.06 ms. With more than PSO_ARCH_COMPACT files, the bases the prewarm takes from them are compiled again from their functions, which captures them, so the flush after the prewarm
+// writes them into one file; the old files are then removed (open archives stay usable for the rest of the run). Bases the prewarm did not take (pso_user.tsv never named them) go
+// with them and are built again when drawn. Not through the compiler with the old files as its lookup archives: the serializer crashed writing bases captured that way
+// (dispatch_retain(NULL) under -[_MTLBinaryArchive materializeAirNTFromOnlineForSlice:entryList:], Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 with 15 files and 421 bases
+// taken from them); bases compiled from source serialize as at any flush. A compaction costs one full compile of those bases, in the prewarm's background time
 enum { PSO_ARCH_COMPACT = 8 };
 static MTL4CompilerTaskOptions *g_compact_opts; static NSArray<NSString *> *g_compact_files; static _Atomic int g_compacted;
 static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_legacy, g_pb_base_ns;   // bases compiled / taken from the archive / reused, specializations, MTLDevice builds
@@ -4380,7 +4388,7 @@ static void pso4_init(void) {
                 g_arch_seq = MAX(g_arch_seq, n.intValue + 1);
             }
             g_arch4 = arch;
-            if (runf.count > PSO_ARCH_COMPACT) { g_compact_opts = [MTL4CompilerTaskOptions new]; g_compact_opts.lookupArchives = arch; g_compact_files = runf; }
+            if (runf.count > PSO_ARCH_COMPACT) { g_compact_opts = [MTL4CompilerTaskOptions new]; g_compact_files = runf; }   // no lookup archives: compiled from source (above)
             MLOG("pipeline archive %s: %lu files, %.1f MB, opened in %.1f ms", g_arch_dir.UTF8String, (unsigned long)arch.count, bytes / 1048576.0, (bp_now() - t0) / 1e6);
         }
         MTL4CompilerDescriptor *cd = [MTL4CompilerDescriptor new]; cd.pipelineDataSetSerializer = ser;
@@ -4479,7 +4487,7 @@ static id<MTLRenderPipelineState> pso_build(MTLRenderPipelineDescriptor *d, NSEr
         for (id<MTL4Archive> a in g_arch4) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) break;
         if (base) g_pb_archived++;
         pthread_rwlock_rdlock(&g_arch_rw);
-        if (base && g_compact_opts && atomic_load(&g_warm_running)) {   // compaction (see g_compact_opts): taken again through the compiler, which captures it
+        if (base && g_compact_opts && atomic_load(&g_warm_running)) {   // compaction (see g_compact_opts): compiled again from source, which captures it
             id<MTLRenderPipelineState> cb = [g_comp4 newRenderPipelineStateWithDescriptor:b compilerTaskOptions:g_compact_opts error:nil];
             if (cb) { base = cb; atomic_fetch_add(&g_arch_new, 1); g_compacted++; }
         }
@@ -4818,6 +4826,95 @@ static inline void args_sync_dirty(void) {
         g_args_reg_seen = reg; g_args_dirty_seen = dirty; args_dirty_all();
     }
 }
+// ---- Buffer textures below Metal's base alignment (tbal) ----
+// Metal asks 16 bytes of a texture buffer view's offset (minimumTextureBufferAlignmentForPixelFormat). An M6 reads the right elements at any multiple of the element size, but an M4 Pro
+// does not: an R32Float view at offset 4, 8 or 12 reads from the offset rounded down to 16, one to three elements early (tbal_offset_ok measures it once). Unreal puts its particle
+// data (Cascade sprite vertex data, R32Float / RG16F / RGBA8 buffer textures) at 4-byte offsets in its pools: on the M4 Pro each particle read its attributes shifted, a colour took
+// the attribute in front of it, and Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2's water techniques and dashes wrote reds of 10^3–10^4 into the scene colour, which the
+// bloom spread over the whole screen as a red flash. Where views are not read right, each use takes an aligned copy instead: before the draw's render pass opens (or before the
+// dispatch), the bytes are copied in the replay stream into this submission's arena and the slot binds a view of the copy, so it sees what the GPU wrote before it, as NVN reads the
+// pool at execution. A copy serves the draws of one render pass (the pass is split when a draw needs one after it opened) and one dispatch. Bindings only read here (no image writes)
+enum { TBAL_MAX = 64 };
+static __unsafe_unretained id<MTLTexture> g_tbal_src[TBAL_MAX]; static __strong id<MTLTexture> g_tbal_view[TBAL_MAX]; static uint64_t g_tbal_rid[TBAL_MAX], g_tbal_ep[TBAL_MAX]; static int g_tbal_n;
+static uint64_t g_tbal_copies, g_tbal_splits, g_tbal_miss;
+static int g_tbal_any;   // a misaligned texture buffer view was made (mtl_tex_obj): until then no draw looks, and the probe does not run (it makes such a view itself)
+static int tbal_offset_ok(void) {   // 1 when a texture buffer view at a 4-byte offset reads its own first element on this GPU
+    static int ok = -1; if (ok >= 0) return ok;
+    ok = 0;
+    static const char *k = "#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void k(texture_buffer<float, access::read> t [[texture(0)]], device float *o [[buffer(0)]]) { o[0] = t.read(0u).x; }\n";
+    NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k) options:nil error:&e];
+    id<MTLComputePipelineState> ps = lib ? [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"k"] error:&e] : nil;
+    id<MTLBuffer> b = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared], o = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
+    MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:MTLPixelFormatR32Float width:8 resourceOptions:MTLResourceStorageModeShared usage:MTLTextureUsageShaderRead];
+    id<MTLTexture> t = b ? [b newTextureWithDescriptor:d offset:4 bytesPerRow:32] : nil;
+    id<MTLCommandQueue> q = [g_dev newCommandQueue];
+    if (!ps || !t || !o || !q) { MLOG("[RED] texture buffer offset probe could not run (%s): views below the 16-byte alignment are copied", e ? e.localizedDescription.UTF8String : "no resources"); return ok; }
+    for (int i = 0; i < 64; i++) ((float *)b.contents)[i] = (float)i;
+    id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce setComputePipelineState:ps]; [ce setTexture:t atIndex:0]; [ce setBuffer:o offset:0 atIndex:0]; [ce dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [ce endEncoding];
+    [cb commit]; [cb waitUntilCompleted];
+    float got = *(float *)o.contents; ok = got == 1.0f;
+    MLOG("texture buffer views below the 16-byte alignment on %s: %s (an R32Float view at offset 4 read %g, element 1 is 1)", g_dev.name.UTF8String,
+         ok ? "read the right elements, bound in place" : "read from the offset rounded down, each use takes an aligned copy (tbal)", got);
+    return ok;
+}
+static inline int tbal_wanted(id<MTLTexture> t) {   // a texture buffer view this GPU would read shifted
+    return g_tbal_any && t && t.textureType == MTLTextureTypeTextureBuffer && t.buffer && (t.bufferOffset & 15) && !tbal_offset_ok();
+}
+static void tbal_reset(void) {   // at a submission's start (and when the table is full); the views live until the GPU is done with them
+    for (int i = 0; i < g_tbal_n; i++) { defer_obj_release(g_tbal_view[i]); g_tbal_view[i] = nil; g_tbal_src[i] = nil; }
+    g_tbal_n = 0;
+}
+static int tbal_find(id<MTLTexture> t) { for (int i = 0; i < g_tbal_n; i++) if (g_tbal_src[i] == t) return i; return -1; }
+// The texture buffer a TBUF binding of this shader resolves to now (tex_slot_h of the stage's slots), or nil
+static __unsafe_unretained id<MTLTexture> tbal_bound(const NvShader *sh, const nvn_rbind *b, uint64_t *mem) {   // mem: the guest address of its storage
+    if (b->kind != NVN_RB_TBUF || sh->stage < 0 || sh->stage > 5) return nil;
+    int tid = (int)(tex_slot_h(S.tex[sh->stage], S.img[sh->stage], b->reg) & 0xfffff); void *tv = NULL;
+    if (!tid || tid >= g_ntreg || !tex_fast_rid(tid, &tv)) return nil;
+    __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+    if (mem) *mem = (uint64_t)g_treg[tid].t.mem;
+    return tbal_wanted(t) ? t : nil;
+}
+// Before a draw (shaders of every stage) or a dispatch (sh[5] only): an aligned copy of every misaligned texture buffer its bindings read, unless one was made with no GPU write
+// encoded since (g_wr_epoch: copies, fills and dispatches; the copies made here only read the pool). A render pass writes only its attachments, so one copy serves the draws of a pass,
+// whatever passes the host splits or opens between them (a copy used to be dropped when its pass ended, and a draw that opened a new pass found none). Inside an open render pass
+// a new copy splits it (Metal copies outside render passes). The table goes at each submission's start (mtl_sub_begin): its copies live in that submission's arena, and the CPU
+// writes the pools between submissions (Unreal's Cascade sprite data)
+static void tbal_sync(NvShader *const *sh, int nsh) {
+    if (g_tbal_any && tbal_offset_ok()) return;   // not before one exists: resolving a binding below can make the first misaligned view (and run the probe)
+    int need = 0;
+    for (int s = 0; s < nsh; s++) if (sh[s]) for (int i = 0; i < sh[s]->rf.nb; i++) {
+        __unsafe_unretained id<MTLTexture> t = tbal_bound(sh[s], &sh[s]->rf.b[i], NULL); if (!t) continue;
+        int k = tbal_find(t); if (k < 0 || g_tbal_ep[k] != g_wr_epoch) need = 1;
+    }
+    if (!need) return;
+    if (g_enc) { g_tbal_splits++; PD("M %llu misaligned texture buffer copies: render pass split here", g_stat_pass); rp_end(); }
+    uint64_t e0 = g_wr_epoch; int mine[TBAL_MAX], nm = 0;
+    for (int s = 0; s < nsh; s++) if (sh[s]) for (int i = 0; i < sh[s]->rf.nb; i++) {
+        uint64_t glo = 0; __unsafe_unretained id<MTLTexture> t = tbal_bound(sh[s], &sh[s]->rf.b[i], &glo);
+        if (!t) continue;
+        int k = tbal_find(t);
+        if (k >= 0 && g_tbal_ep[k] == e0) { if (nm < TBAL_MAX) mine[nm++] = k; continue; }   // still current
+        if (k < 0) {
+            if (g_tbal_n == TBAL_MAX) { tbal_reset(); nm = 0; }   // the oldest copies go (their views live until the GPU is done)
+            k = g_tbal_n++; g_tbal_src[k] = t; g_tbal_view[k] = nil;
+        }
+        id<MTLBuffer> src = t.buffer; NSUInteger row = t.bufferBytesPerRow, so = t.bufferOffset, n = row;
+        if (so + n > src.length) n = src.length - so;   // the view's last row may run past the pool buffer; nothing there can be read
+        id<MTLBuffer> ab; size_t ao = arena_alloc(row, &ab);   // arena offsets are 256-aligned
+        enc_b_copy_buffer(blit_buf(glo, glo + n, 0, 0), src, so, ab, ao, n);
+        MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:t.pixelFormat width:t.width resourceOptions:ab.resourceOptions usage:MTLTextureUsageShaderRead];
+        id<MTLTexture> v = [ab newTextureWithDescriptor:d offset:ao bytesPerRow:row];
+        if (!v) { if (!g_tbal_miss++) MLOG("[RED] cannot make the aligned copy of a texture buffer (%lu elements, pixel format %lu): bound in place (read shifted)", (unsigned long)t.width, (unsigned long)t.pixelFormat); continue; }
+        if (!g_tbal_copies++) MLOG("misaligned texture buffer: an aligned copy of %lu bytes from pool offset %lu (pixel format %lu, %lu elements) is bound instead (first case)", (unsigned long)n, (unsigned long)so, (unsigned long)t.pixelFormat, (unsigned long)t.width);
+        if (g_tbal_view[k]) defer_obj_release(g_tbal_view[k]);
+        g_tbal_view[k] = v; g_tbal_rid[k] = v.gpuResourceID._impl;
+        if (nm < TBAL_MAX) mine[nm++] = k;
+    }
+    for (int j = 0; j < nm; j++) g_tbal_ep[mine[j]] = g_wr_epoch;   // this draw's copies are current after the copies themselves
+}
+void mtl_tbal_stats(uint64_t *copies, uint64_t *splits, uint64_t *miss) { *copies = g_tbal_copies; *splits = g_tbal_splits; *miss = g_tbal_miss; }
 static void bind_args(id<MTLCommandEncoder> en, int nvn_stage, int metal_vertex, id<MTLBuffer> ab, uint64_t gpu, size_t off, NSUInteger ai) {
     if (nvn_stage == 5 || nvn_stage == 2) enc_c_args((id<MTLComputeCommandEncoder>)en, gpu, ai);
     else enc_r_args((id<MTLRenderCommandEncoder>)en, metal_vertex ? MTLRenderStageVertex : MTLRenderStageFragment, gpu, ai);
@@ -4981,6 +5078,11 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             if (t && t.textureType != MTLTextureTypeTextureBuffer) { tex_mis_note(sh, nvn_stage, reg, tid, t, MTLTextureTypeTextureBuffer, "a buffer slot: it reads 0 (dummy)"); t = nil; }
             if (bl) PD("B %llu st%d tbuf reg%d tid=%d %s ser=%llu fmt=%#x n=%u mem=%p", g_stat_pass, nvn_stage, reg, tid, t ? "real" : "dummy", t && tid < g_ntreg ? g_treg[tid].t.serial : 0ull,
                        tid < g_ntreg ? g_treg[tid].t.d.format : 0, tid < g_ntreg ? g_treg[tid].t.d.width : 0, tid < g_ntreg ? (void *)g_treg[tid].t.mem : NULL);
+            if (t && tbal_wanted(t)) {   // a view this GPU reads shifted: the aligned copy made before this draw / dispatch (tbal_sync)
+                int k = tbal_find(t);
+                if (k >= 0) { t = g_tbal_view[k]; trid = g_tbal_rid[k]; }
+                else if (!g_tbal_miss++) MLOG("[RED] misaligned texture buffer bound with no aligned copy (texture ID %d, pass %llu): read shifted", tid, (unsigned long long)g_stat_pass);
+            }
             if (!t) { t = dummy_tbuf(b->dpf); trid = g_dummy_tbuf_rid[b->dpf & 3]; }
             slots[aid] = trid;
             USE(t, MTLResourceUsageRead);
@@ -7097,6 +7199,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
         if (!mdx_find(ind, cnt, &mdx)) { mdx_run(dw, di); if (!mdx_find(ind, cnt, &mdx)) mdx = 0; }
         if (!mdx && !mdi_live(cnt, i)) return; }
     if (di && wide_wanted(di) && !wide_find(di)) wide_run(di);   // 8-bit indices written earlier in this submission: widened on the GPU before the render pass (see wide_run)
+    tbal_sync(pr->sh, 5);   // misaligned texture buffers: aligned copies before the render pass (see tbal_sync)
     if (!g_defer_replaying && !g_geo_program) {
         if (g_defer.active && g_defer.in_p && !g_defer.at_q) { if (defer_take(dw, di)) return; }
     }
@@ -7435,6 +7538,7 @@ static void dispatch(const p_dispatch *dp) {
     if (!tg[0]) { RED_ONCE(29, "compute shader lacks threadgroup size reflection"); return; }
     if (g_nubd && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
     rp_end();
+    tbal_sync(&cs, 1);   // misaligned texture buffers: aligned copies for this dispatch, after what came before it (see tbal_sync)
     int own = dispatch_own();
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
     id<MTLComputeCommandEncoder> ce = own ? pg_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();

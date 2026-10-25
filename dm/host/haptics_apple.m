@@ -8,6 +8,7 @@
 #import <AVFAudio/AVFAudio.h>
 #else
 #import <AppKit/AppKit.h>
+#import <IOKit/hid/IOHIDManager.h>
 #endif
 #include <math.h>
 #include <pthread.h>
@@ -51,6 +52,10 @@ static void report(NSError *e, NSString *target, const char *stage) {
                                 [underlying.userInfo[NSDebugDescriptionErrorKey] UTF8String] : underlying.localizedDescription.UTF8String);
     }
 }
+
+#if !TARGET_OS_IPHONE
+static void report_hid(IOReturn r) { if (++errors <= 8 || errors % 64 == 0) fprintf(stderr, "[RED] haptics: controller HID rumble report: IOReturn 0x%x\n", r); }
+#endif
 
 @implementation DmRumbleChannel
 - (void)stop {
@@ -105,7 +110,14 @@ static void report(NSError *e, NSString *target, const char *stage) {
         ] relativeTime:0 duration:30];
         CHHapticPattern *pattern = [[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:&error];
         self.pattern = pattern ? [self.engine createAdvancedPlayerWithPattern:pattern error:&error] : nil;
-        if (!self.pattern) { [self failed:error stage:"create player"]; return; }
+        if (!self.pattern) {
+            // The Xbox Wireless Controller on the Mac starts its left handle's engine, but making its player fails with NSCocoaErrorDomain 4097 (the helper connection was
+            // interrupted) on every try: such a lost helper connection counts as the engine failing, so a split route falls back to the default locality like an engine
+            // that cannot start; other player errors are retried on the same handle
+            if ([error.domain isEqualToString:NSCocoaErrorDomain] && (error.code == 4097 || error.code == 4099)) [self engineFailed:error stage:"create player"];
+            else [self failed:error stage:"create player"];
+            return;
+        }
         self.pattern.loopEnabled = YES;
         self.pattern.isMuted = YES;
         if (![self.pattern startAtTime:CHHapticTimeImmediate error:&error]) { [self failed:error stage:"start player"]; return; }
@@ -130,10 +142,69 @@ static void report(NSError *e, NSString *target, const char *stage) {
 }
 @end
 
+#if !TARGET_OS_IPHONE
+// An Xbox Wireless Controller over Bluetooth on the Mac takes its rumble as HID output report 3, as SDL's HIDAPI driver sends it: an enable mask, the left and right
+// trigger motors, the strong (left grip) and weak (right grip) motors in percent, then duration and delay in 10 ms units and a repeat count (255 x 10 ms, 235
+// repeats: about 10 minutes, so a held value lasts as a Switch motor's does). It is the route when Core Haptics fails at every locality: on the Mac every player of
+// this controller failed with NSCocoaErrorDomain 4097, the connection to gamecontrollerd's haptics service interrupted, Default and Handles included.
+static IOHIDDeviceRef xbox_hid_find(GCController *controller, NSArray *taken) {
+    if (![controller.vendorName hasPrefix:@"Xbox"]) return NULL;
+    static IOHIDManagerRef manager;
+    if (!manager) {
+        manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+        IOHIDManagerSetDeviceMatching(manager, (__bridge CFDictionaryRef)@{@kIOHIDVendorIDKey: @0x045E, @kIOHIDPrimaryUsagePageKey: @1, @kIOHIDPrimaryUsageKey: @5});
+        if (IOHIDManagerOpen(manager, kIOHIDOptionsTypeNone) != kIOReturnSuccess) { CFRelease(manager); manager = NULL; return NULL; }
+    }
+    NSSet *devices = CFBridgingRelease(IOHIDManagerCopyDevices(manager));
+    // GameController does not say which HID device a controller is: with several Xbox pads each player takes the first one no other player holds
+    for (id d in devices) {
+        IOHIDDeviceRef dev = (__bridge IOHIDDeviceRef)d;
+        NSString *transport = (__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey));
+        if (![transport hasPrefix:@"Bluetooth"] || [taken containsObject:d]) continue;
+        if (IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone) == kIOReturnSuccess) return (IOHIDDeviceRef)CFRetain(dev);
+    }
+    return NULL;
+}
+static IOReturn xbox_hid_write(IOHIDDeviceRef dev, const uint8_t *report, size_t n) { return IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, report[0], report, n); }
+static IOHIDDeviceRef (*hid_find)(GCController *, NSArray *) = xbox_hid_find;
+static IOReturn (*hid_write)(IOHIDDeviceRef, const uint8_t *, size_t) = xbox_hid_write;
+
+@interface DmHidRumble : DmRumbleChannel
+@property(nonatomic) IOHIDDeviceRef device;
+@property(nonatomic) int strong, weak;
+- (void)send:(dm_haptic_state)s;
+@end
+@implementation DmHidRumble
+- (void)write:(int)strong weak:(int)weak {
+    if (!self.device || (strong == self.strong && weak == self.weak)) return;
+    const uint8_t packet[] = {0x03, 0x0F, 0, 0, (uint8_t)strong, (uint8_t)weak, 0xFF, 0x00, 0xEB};
+    IOReturn r = hid_write(self.device, packet, sizeof packet);
+    if (r != kIOReturnSuccess) {
+        report_hid(r);
+        CFRelease(self.device); self.device = NULL;   // gone or refused: the next connection configures the route again
+        return;
+    }
+    self.strong = strong; self.weak = weak;
+}
+// Its motors are eccentric masses, which a Switch game's low amplitudes barely turn: each motor's level goes through yuzu's curve for controllers without HD rumble,
+// (a + a^0.35) / 2 (0.1 → 0.27, 0.3 → 0.48, 1 → 1), before the gain
+static int erm_percent(const dm_vibration *v) {
+    float a = dm_haptics_level(v, 1, 1).intensity;
+    return (int)lroundf(fminf(1, (a + powf(a, 0.35f)) * 0.5f * gain) * 100);
+}
+- (void)send:(dm_haptic_state)s { [self write:erm_percent(&s.motor[0]) weak:erm_percent(&s.motor[1])]; }
+- (void)stop { [self write:0 weak:0]; }
+- (void)dealloc { if (self.device) CFRelease(self.device); }
+@end
+#endif
+
 static void apply(dm_haptic_state s) {
     dispatch_async(queue, ^{ @autoreleasepool {
         if (s.epoch != dm_haptics_epoch(s.player)) return;
         NSArray<DmRumbleChannel *> *out = channels[s.player];
+#if !TARGET_OS_IPHONE
+        if ([out.firstObject isKindOfClass:DmHidRumble.class]) { [(DmHidRumble *)out.firstObject send:s]; return; }
+#endif
         for (NSUInteger i = 0; i < out.count; i++) {
             if (s.epoch != dm_haptics_epoch(s.player)) break;   // a failed channel may replace this route
             dm_haptic_level level = out.count == 2 ? dm_haptics_level(&s.motor[i], 1, gain) : dm_haptics_level(s.motor, 2, gain);
@@ -145,9 +216,34 @@ static void add_engine(int p, NSString *target, CHHapticEngine *(^create)(NSErro
     DmRumbleChannel *c = [DmRumbleChannel new]; c.createEngine = create; c.target = target; c.player = p;
     [channels[p] addObject:c];
 }
-static void default_controller(int p, GCDeviceHaptics *h, NSTimeInterval retryAfter) {
+#if !TARGET_OS_IPHONE
+// The last fallback: when the default locality cannot make an engine or a player either, an Xbox controller is driven by its HID report
+static void hid_fallback(int p, GCController *controller) {
+    __weak NSArray *route = channels[p];
+    channels[p].lastObject.fallback = ^(NSTimeInterval retryAfter) {
+        (void)retryAfter;
+        if (!route || channels[p] != route) return;
+        NSMutableArray *taken = [NSMutableArray new];
+        for (int q = 0; q < DM_PLAYERS; q++) if (q != p && [channels[q].firstObject isKindOfClass:DmHidRumble.class]) {
+            IOHIDDeviceRef d = ((DmHidRumble *)channels[q].firstObject).device; if (d) [taken addObject:(__bridge id)d];
+        }
+        IOHIDDeviceRef dev = hid_find(controller, taken);
+        if (!dev) return;
+        for (DmRumbleChannel *old in channels[p]) [old stop];
+        DmHidRumble *c = [DmHidRumble new]; c.device = dev; c.player = p; c.target = @"controller HID";
+        channels[p] = [NSMutableArray arrayWithObject:c];
+        dm_haptics_route(p, 1);
+        fprintf(stderr, "haptics: player %d uses the controller's HID rumble report\n", p + 1);
+    };
+}
+#endif
+static void default_controller(int p, GCController *controller, NSTimeInterval retryAfter) {
+    GCDeviceHaptics *h = controller.haptics;
     add_engine(p, @"controller default", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityDefault]; });
     channels[p].lastObject.retryAfter = retryAfter;
+#if !TARGET_OS_IPHONE
+    hid_fallback(p, controller);
+#endif
 }
 static void configure(int p, GCController *controller) {
     for (DmRumbleChannel *c in channels[p]) [c stop];
@@ -165,12 +261,12 @@ static void configure(int p, GCController *controller) {
                 if (!route || channels[p] != route) return;
                 for (DmRumbleChannel *old in channels[p]) [old stop];
                 channels[p] = [NSMutableArray new];
-                default_controller(p, h, retryAfter);
+                default_controller(p, controller, retryAfter);
                 dm_haptics_route(p, 1);
                 fprintf(stderr, "haptics: player %d retrying with the default controller locality\n", p + 1);
             };
         }
-        else if (localities.count) default_controller(p, h, 0);
+        else if (localities.count) default_controller(p, controller, 0);
         fprintf(stderr, "haptics: player %d controller %s, localities %s, %lu channels\n", p + 1,
                 controller.vendorName.UTF8String ?: "unknown", [[localities.allObjects sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@", "].UTF8String ?: "none", (unsigned long)channels[p].count);
     }
