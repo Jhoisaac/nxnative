@@ -1560,6 +1560,10 @@ GL(glGetRenderbufferParameteriv, void, GLenum target, GLenum p, GLint *v) {
         case GL_RENDERBUFFER_SAMPLES: *v = 0; return;
         case GL_RENDERBUFFER_WIDTH: *v = r ? (GLint)r->w : 0; return;
         case GL_RENDERBUFFER_HEIGHT: *v = r ? (GLint)r->h : 0; return;
+        // RED / GREEN / BLUE / ALPHA_SIZE 0x8d50–0x8d53, DEPTH_SIZE 0x8d54 (a 32F depth reports 24, the DEPTH24 it stands for), STENCIL_SIZE 0x8d55 (Naruto STORM 4's Scaleform)
+        case 0x8d50: case 0x8d51: case 0x8d52: case 0x8d53: { const fmt_t *m = r && r->tex ? &g_fmt[r->fmt] : NULL; *v = m && m->kind == K_COL && m->bytes == 4 ? 8 : 0; return; }
+        case 0x8d54: { const fmt_t *m = r && r->tex ? &g_fmt[r->fmt] : NULL; *v = !m || m->pf == MTLPixelFormatStencil8 ? 0 : m->pf == MTLPixelFormatDepth16Unorm ? 16 : m->kind == K_DEPTH || m->kind == K_DS ? 24 : 0; return; }
+        case 0x8d55: { const fmt_t *m = r && r->tex ? &g_fmt[r->fmt] : NULL; *v = m && m->kind == K_DS ? 8 : 0; return; }
     }
     RED1("glGetRenderbufferParameteriv(%#x) not implemented", p); *v = 0;
 }
@@ -1595,6 +1599,25 @@ GL(glFramebufferTexture2D, void, GLenum target, GLenum att, GLenum textarget, GL
 GL(glFramebufferTextureLayer, void, GLenum target, GLenum att, GLuint t, GLint level, GLint layer) { fb_attach(target, att, 1, t, level, layer); }
 GL(glFramebufferTexture3D, void, GLenum target, GLenum att, GLenum textarget, GLuint t, GLint level, GLint z) { (void)textarget; fb_attach(target, att, 1, t, level, z); }
 GL(glFramebufferRenderbuffer, void, GLenum target, GLenum att, GLenum rbt, GLuint r) { (void)rbt; fb_attach(target, att, 2, r, 0, 0); }
+// What a framebuffer attachment holds (Naruto STORM 4's Scaleform asks the type of the bound framebuffer's stencil attachment): OBJECT_TYPE 0x8cd0, OBJECT_NAME 0x8cd1,
+// TEXTURE_LEVEL 0x8cd2, TEXTURE_CUBE_MAP_FACE 0x8cd3, TEXTURE_LAYER 0x8cd4; framebuffer 0's attachments are FRAMEBUFFER_DEFAULT
+GL(glGetFramebufferAttachmentParameteriv, void, GLenum target, GLenum attachment, GLenum p, GLint *v) {
+    fb_t *f = fb_of(target == GL_READ_FRAMEBUFFER ? S.read_fb : S.fb); const att_t *a = NULL;
+    if (f) {
+        if (attachment == GL_COLOR_ATTACHMENT0) a = &f->col;
+        else if (attachment == GL_DEPTH_ATTACHMENT || attachment == GL_DEPTH_STENCIL_ATTACHMENT) a = &f->depth;
+        else if (attachment == GL_STENCIL_ATTACHMENT) a = &f->stencil;
+        else { RED1("glGetFramebufferAttachmentParameteriv: attachment %#x not implemented", attachment); *v = 0; return; }
+    }
+    switch (p) {
+        case 0x8cd0: *v = !f ? 0x8218 : a->kind == 1 ? 0x1702 : a->kind == 2 ? 0x8d41 : 0; return;   // FRAMEBUFFER_DEFAULT / TEXTURE / RENDERBUFFER / NONE
+        case 0x8cd1: *v = f ? (GLint)a->name : 0; return;
+        case 0x8cd2: *v = f && a->kind == 1 ? a->level : 0; return;
+        case 0x8cd3: { tex_t *t = f && a->kind == 1 ? tex_of(a->name) : NULL; *v = t && t->target == GL_TEXTURE_CUBE_MAP ? (GLint)(GL_TEXTURE_CUBE_MAP_POSITIVE_X + a->face) : 0; return; }
+        case 0x8cd4: *v = f && a->kind == 1 ? a->face : 0; return;
+    }
+    RED1("glGetFramebufferAttachmentParameteriv(%#x) not implemented", p); *v = 0;
+}
 // A framebuffer's colour image: the texture, its level and its slice (a cube face or an array layer) or 3D slice
 static id<MTLTexture> fb_color(GLuint fb, int *level, int *slice) {
     *level = *slice = 0;
