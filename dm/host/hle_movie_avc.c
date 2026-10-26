@@ -2,7 +2,7 @@
 // Super Mario Odyssey's 44 movies are MP4 / H.264 (the hint videos in its tutorial boxes, the kingdom travel videos): 41 High or Main profile with B-frames, 3 Baseline.
 // The SDK's demuxer hands over one access unit per packet with Annex B start codes; SPS / PPS come in Configure's csd-0 / csd-1 (as with Android's MediaCodec) and may also appear in the stream.
 // VideoToolbox wants a format description built from SPS / PPS and NAL units with 4-byte length prefixes. Decoding is synchronous and yields pictures in decode order; MediaCodec yields them
-// in presentation order, so pictures wait in a queue sorted by presentation time and leave it once more than `depth` are queued (4 when the profile has B-frames, 0 for Baseline), or all at the end of the stream
+// in presentation order, so pictures wait in a queue sorted by presentation time and leave it once more than `depth` are queued (4 when the profile has B-frames, 0 for Baseline), or all at the end of the stream. A stream that starts over without a Flush (Odyssey's looping hint videos send the first packet again) begins a new segment: a picture whose time is before the last one handed out belongs to it, and the old segment's pictures leave first, in their order (without this the queue kept the old segment's last pictures for good, and every later picture left in decode order)
 #include "hle.h"
 #include <VideoToolbox/VideoToolbox.h>
 #include <arm_neon.h>
@@ -12,17 +12,18 @@
 struct mavc {
     uint8_t sps[512], pps[512]; int nsps, npps, dirty;
     CMVideoFormatDescriptionRef fd; VTDecompressionSessionRef vs;
-    struct { CVPixelBufferRef pb; int64_t pts; } q[QMAX]; int nq, depth;
+    struct { CVPixelBufferRef pb; int64_t pts; int seg; } q[QMAX]; int nq, depth;
+    int seg, out_seg; int64_t out_pts;   // the segment being decoded; the segment and time of the last picture handed out
     uint8_t *au; size_t aucap;   // length-prefixed copy of the access unit being decoded
     int red, rgba;               // rgba: pictures as 4-byte RGBA (native texture mode, Monster Hunter Rise) instead of NV12
 };
 
-mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); return a; }
+mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); a->out_pts = INT64_MIN; return a; }
 static void close_session(mavc *a) {
     if (a->vs) { VTDecompressionSessionWaitForAsynchronousFrames(a->vs); VTDecompressionSessionInvalidate(a->vs); CFRelease(a->vs); a->vs = NULL; }
     if (a->fd) { CFRelease(a->fd); a->fd = NULL; }
 }
-void mavc_drop(mavc *a) { for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb); a->nq = 0; }
+void mavc_drop(mavc *a) { for (int i = 0; i < a->nq; i++) CVPixelBufferRelease(a->q[i].pb); a->nq = 0; a->out_seg = a->seg; a->out_pts = INT64_MIN; }
 void mavc_free(mavc *a) { if (!a) return; close_session(a); mavc_drop(a); free(a->au); free(a); }
 int mavc_queued(const mavc *a) { return a->nq; }
 
@@ -68,8 +69,9 @@ static void on_frame(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CV
     if (st || !img) { if (!a->red++) LOG("[RED] movie: AVC decode error (VideoToolbox %d, first case)", (int)st); return; }
     if (a->nq == QMAX) { if (!a->red++) LOG("[RED] movie: AVC reorder queue full, dropping the oldest frame"); CVPixelBufferRelease(a->q[0].pb); memmove(a->q, a->q + 1, --a->nq * sizeof a->q[0]); }
     int64_t t = pts.timescale ? pts.value * 1000000 / pts.timescale : 0;
-    int k = a->nq; while (k > 0 && a->q[k - 1].pts > t) { a->q[k] = a->q[k - 1]; k--; }
-    a->q[k].pb = CVPixelBufferRetain(img); a->q[k].pts = t; a->nq++;
+    if (a->out_seg == a->seg && t < a->out_pts) a->seg++;   // the stream started over
+    int k = a->nq; while (k > 0 && a->q[k - 1].seg == a->seg && a->q[k - 1].pts > t) { a->q[k] = a->q[k - 1]; k--; }
+    a->q[k].pb = CVPixelBufferRetain(img); a->q[k].pts = t; a->q[k].seg = a->seg; a->nq++;
 }
 static int open_session(mavc *a) {
     close_session(a);
@@ -126,6 +128,7 @@ static void take_rgba(CVPixelBufferRef pb, uint8_t *dst, int w, int h) {
 int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
     if (!a->nq || (!flush && a->nq <= a->depth)) return 0;
     CVPixelBufferRef pb = a->q[0].pb; if (pts_us) *pts_us = a->q[0].pts;
+    a->out_seg = a->q[0].seg; a->out_pts = a->q[0].pts;
     memmove(a->q, a->q + 1, --a->nq * sizeof a->q[0]);
     CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
     if (a->rgba) { take_rgba(pb, dst, w, h); CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly); CVPixelBufferRelease(pb); return 1; }
