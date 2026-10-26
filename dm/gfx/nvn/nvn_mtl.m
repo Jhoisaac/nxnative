@@ -1338,6 +1338,7 @@ typedef struct { uint64_t pool; int64_t off; nvn_texdesc d; } alias_key;
 static nvn_hmap g_alias = {.klen = sizeof(alias_key)};
 static nvn_hmap g_alias_seen = {.klen = sizeof(alias_key)};   // key → g_fence + 1 at its last lookup or creation (alias_take_over spares entries looked up lately)
 static CFMutableSetRef g_alias_set;   // Textures in the sharing table (non-owning; used to ask "is this shared")
+static CFMutableSetRef g_view_bases;   // Shared textures a mip-prefix view was made of (alias_prefix_base; non-owning): alias_take_over leaves them, as the view samples their storage; a pool Finalize still evicts them
 static uint64_t g_alias_evicted;   // shared textures evicted on pool Finalize so far (for the memory report)
 static int alias_has(id o) { return g_alias_set && o && CFSetContainsValue(g_alias_set, (__bridge const void *)o); }
 // On memory pool Finalize, evict the textures built on that pool from the sharing table (collect the keys first, then delete: deletion shifts entries back). The sharing table used not to evict: Mario's pools stay for good, so entries are bounded;
@@ -1360,6 +1361,7 @@ void mtl_alias_drop_pool(const void *pool) {
         nvn_hm_del(&g_alias_seen, &ks[j]);
         id o = CFBridgingRelease(old);
         if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
+        if (g_view_bases) CFSetRemoveValue(g_view_bases, (__bridge const void *)o);
         defer_obj_release(o);
     }
     if (n) { g_ser_gen++; g_alias_evicted += n; }
@@ -1389,7 +1391,8 @@ static void alias_take_over(const alias_key *nk) {
         if (k.pool != nk->pool || !memcmp(&k, nk, sizeof k) || k.off >= hi) continue;
         nvn_texlayout kl; nvn_tex_layout(&k.d, &kl);
         uint64_t seen = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, &k);
-        if (k.off + (int64_t)kl.size <= lo || (seen && g_fence + 1 - seen < ALIAS_IDLE) || serial_holds(&g_by_serial, (__bridge id)g_alias.vals[i])) continue;
+        if (k.off + (int64_t)kl.size <= lo || (seen && g_fence + 1 - seen < ALIAS_IDLE) || serial_holds(&g_by_serial, (__bridge id)g_alias.vals[i])
+            || (g_view_bases && CFSetContainsValue(g_view_bases, g_alias.vals[i]))) continue;
         ks[n++] = k;
     }
     for (uint32_t j = 0; j < n; j++) {
@@ -1401,6 +1404,21 @@ static void alias_take_over(const alias_key *nk) {
         if (serial_holds(&g_ghost, o)) defer_obj_unref(o); else defer_obj_release(o);
     }
     if (n) { g_ser_gen++; g_alias_taken += n; }
+}
+// A texture on the storage of a shared one with the same description but more mip levels (the same pool and offset): that texture's image, whose first levels it is.
+// Naruto STORM 4 makes each texture twice on one storage, with all its levels and then with one fewer (with a swizzle), copies the data into the first and samples only the second,
+// which had an image of its own that nothing wrote (characters drew black). Caller holds g_smu
+static __unsafe_unretained id alias_prefix_base(const alias_key *nk) {
+    for (uint32_t i = 0; i < g_alias.cap; i++) {
+        if (!g_alias.vals[i]) continue;
+        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+        if (k.pool != nk->pool || k.off != nk->off || k.d.levels <= nk->d.levels) continue;
+        k.d.levels = nk->d.levels;
+        if (memcmp(&k.d, &nk->d, sizeof k.d)) continue;
+        memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k); nvn_hm_put(&g_alias_seen, &k, (void *)(uintptr_t)(g_fence + 1));
+        return (__bridge id)g_alias.vals[i];
+    }
+    return nil;
 }
 static __unsafe_unretained id serial_get(uint64_t k) { pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); pthread_mutex_unlock(&g_smu); return o; }
 static void serial_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { if (alias_has(old)) defer_obj_unref(old); else defer_obj_release(old); } hm_put_id(&g_by_serial, &k, o); g_ser_gen++; pthread_mutex_unlock(&g_smu); }
@@ -2091,6 +2109,17 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     alias_key ak; memset(&ak, 0, sizeof ak); ak.pool = (uint64_t)(uintptr_t)t->pool; ak.off = t->off; ak.d = t->d;
     pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
     if (shared) { tex_put(t->serial, shared); return shared; }
+    if (t->d.samples <= 1) {   // a mip prefix of a shared texture on the same storage: a view of its first levels (alias_prefix_base); the view keeps its base alive, the residency set keeps the base resident
+        pthread_mutex_lock(&g_smu); id<MTLTexture> base = alias_prefix_base(&ak); pthread_mutex_unlock(&g_smu);
+        if (base && !base.buffer) {
+            NSUInteger ns = base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? base.arrayLength * 6 : base.arrayLength;
+            id<MTLTexture> v = [base newTextureViewWithPixelFormat:base.pixelFormat textureType:base.textureType levels:NSMakeRange(0, t->d.levels) slices:NSMakeRange(0, ns)];
+            if (v) {
+                pthread_mutex_lock(&g_smu); if (!g_view_bases) g_view_bases = CFSetCreateMutable(NULL, 0, NULL); CFSetAddValue(g_view_bases, (__bridge const void *)base); pthread_mutex_unlock(&g_smu);
+                tex_put(t->serial, v); return v;
+            }
+        }
+    }
     id<MTLTexture> mt = tex_linear(t);
     if (!mt) {
         MTLTextureDescriptor *d = tex_desc(t, 0);

@@ -71,7 +71,9 @@ t_primitive_restart.dSYM/
 t_clear_ds
 t_clear_ds.dSYM/
 t_upgrade_alias
+t_prefix_alias
 t_upgrade_alias.dSYM/
+t_prefix_alias.dSYM/
 t_stencil_view
 t_stencil_view.dSYM/
 t_pso_archive
