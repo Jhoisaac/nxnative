@@ -12,6 +12,7 @@
 #endif
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <time.h>
 
 @interface DmRumbleChannel : NSObject
@@ -144,9 +145,13 @@ static void report_hid(IOReturn r) { if (++errors <= 8 || errors % 64 == 0) fpri
 
 #if !TARGET_OS_IPHONE
 // An Xbox Wireless Controller over Bluetooth on the Mac takes its rumble as HID output report 3, as SDL's HIDAPI driver sends it: an enable mask, the left and right
-// trigger motors, the strong (left grip) and weak (right grip) motors in percent, then duration and delay in 10 ms units and a repeat count (255 x 10 ms, 235
-// repeats: about 10 minutes, so a held value lasts as a Switch motor's does). It is the route when Core Haptics fails at every locality: on the Mac every player of
-// this controller failed with NSCocoaErrorDomain 4097, the connection to gamecontrollerd's haptics service interrupted, Default and Handles included.
+// trigger motors, the strong (left grip) and weak (right grip) motors in percent, then duration and delay in 10 ms units and a repeat count. It is the route when Core
+// Haptics fails at every locality: on the Mac every player of this controller failed with NSCocoaErrorDomain 4097, the connection to gamecontrollerd's haptics service
+// interrupted, Default and Handles included. Each report holds its value for 1 s and a value that is not zero is sent again every 0.5 s, so a held value lasts as a
+// Switch motor's does, yet the motors stop within a second when the host ends without stopping them (Ctrl-C, SIGTERM's _exit, a crash) or a report fails, where a
+// report held for about 10 minutes outlived the host (found on Super Mario Odyssey, whose pad kept rumbling)
+enum { HID_HOLD = 100 };   // one report's duration in 10 ms units, no repeats
+static const double HID_REFRESH = 0.5;   // seconds between sends of a held value
 static IOHIDDeviceRef xbox_hid_find(GCController *controller, NSArray *taken) {
     if (![controller.vendorName hasPrefix:@"Xbox"]) return NULL;
     static IOHIDManagerRef manager;
@@ -172,38 +177,52 @@ static IOReturn (*hid_write)(IOHIDDeviceRef, const uint8_t *, size_t) = xbox_hid
 @interface DmHidRumble : DmRumbleChannel
 @property(nonatomic) IOHIDDeviceRef device;
 @property(nonatomic) int strong, weak;
+@property(nonatomic) uint64_t hold;   // the held value's refresh chain; a newer value or a stop ends it
 - (void)send:(dm_haptic_state)s;
 @end
 @implementation DmHidRumble
+- (BOOL)report:(int)strong weak:(int)weak {
+    const uint8_t packet[] = {0x03, 0x0F, 0, 0, (uint8_t)strong, (uint8_t)weak, HID_HOLD, 0x00, 0x00};
+    IOReturn r = hid_write(self.device, packet, sizeof packet);
+    if (r == kIOReturnSuccess) return YES;
+    report_hid(r);
+    CFRelease(self.device); self.device = NULL;   // gone or refused: the next connection configures the route again, and the last report runs out by itself
+    return NO;
+}
 - (void)write:(int)strong weak:(int)weak {
     if (!self.device || (strong == self.strong && weak == self.weak)) return;
-    const uint8_t packet[] = {0x03, 0x0F, 0, 0, (uint8_t)strong, (uint8_t)weak, 0xFF, 0x00, 0xEB};
-    IOReturn r = hid_write(self.device, packet, sizeof packet);
-    if (r != kIOReturnSuccess) {
-        report_hid(r);
-        CFRelease(self.device); self.device = NULL;   // gone or refused: the next connection configures the route again
-        return;
-    }
+    if (![self report:strong weak:weak]) return;
     self.strong = strong; self.weak = weak;
+    uint64_t hold = ++self.hold;
+    if (strong || weak) [self refresh:hold];
 }
-// Its motors are eccentric masses, which a Switch game's low amplitudes barely turn: each motor's level goes through yuzu's curve for controllers without HD rumble,
-// (a + a^0.35) / 2 (0.1 → 0.27, 0.3 → 0.48, 1 → 1), before the gain
-static int erm_percent(const dm_vibration *v) {
-    float a = dm_haptics_level(v, 1, 1).intensity;
-    return (int)lroundf(fminf(1, (a + powf(a, 0.35f)) * 0.5f * gain) * 100);
+- (void)refresh:(uint64_t)hold {
+    __weak DmHidRumble *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(HID_REFRESH * NSEC_PER_SEC)), queue, ^{
+        DmHidRumble *c = weakSelf;
+        if (c && c.hold == hold && c.device && [c report:c.strong weak:c.weak]) [c refresh:hold];
+    });
 }
-- (void)send:(dm_haptic_state)s { [self write:erm_percent(&s.motor[0]) weak:erm_percent(&s.motor[1])]; }
+// Each motor's level is its Core Haptics intensity, linear with the gain, as every other controller's: a curve that raised low amplitudes ((a + a^0.35) / 2, 0.1 → 27%)
+// turned the faint rumble a game holds through a cutscene or plays at each step into a strong one (found on Super Mario Odyssey, whose pad rumbled all through its opening)
+static int hid_percent(const dm_vibration *v) { return (int)lroundf(dm_haptics_level(v, 1, gain).intensity * 100); }
+- (void)send:(dm_haptic_state)s { [self write:hid_percent(&s.motor[0]) weak:hid_percent(&s.motor[1])]; }
 - (void)stop { [self write:0 weak:0]; }
 - (void)dealloc { if (self.device) CFRelease(self.device); }
 @end
 #endif
 
+// Each state is the whole motor pair, so a HID report only needs the newest: a state with a newer one behind it on the queue is dropped. A HID report is a synchronous Bluetooth
+// write; Super Mario Odyssey changes its rumble about 200 times a second through its opening cutscene, faster than the controller takes reports, and the queue fell minutes
+// behind: the pad rumbled long after the cutscene had set 0
+static _Atomic uint64_t newest[DM_PLAYERS];
 static void apply(dm_haptic_state s) {
+    uint64_t seq = atomic_fetch_add(&newest[s.player], 1) + 1;
     dispatch_async(queue, ^{ @autoreleasepool {
         if (s.epoch != dm_haptics_epoch(s.player)) return;
         NSArray<DmRumbleChannel *> *out = channels[s.player];
 #if !TARGET_OS_IPHONE
-        if ([out.firstObject isKindOfClass:DmHidRumble.class]) { [(DmHidRumble *)out.firstObject send:s]; return; }
+        if ([out.firstObject isKindOfClass:DmHidRumble.class]) { if (seq == atomic_load(&newest[s.player])) [(DmHidRumble *)out.firstObject send:s]; return; }
 #endif
         for (NSUInteger i = 0; i < out.count; i++) {
             if (s.epoch != dm_haptics_epoch(s.player)) break;   // a failed channel may replace this route

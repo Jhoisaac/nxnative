@@ -192,17 +192,24 @@ int main(void) { @autoreleasepool {
     expire_retries(); send_pair(0.3, 0.4); drain();   // the default locality fails: to the HID report
     assert(lost.haptics.attempts == 2 && hid_finds == 1 && [channels[0].firstObject isKindOfClass:DmHidRumble.class]);
     send_pair(0.3, 0.4); drain();
-    assert(hid_writes == 1 && hid_last[0] == 3 && hid_last[1] == 0x0F && hid_last[4] == 48 && hid_last[5] == 56 && hid_last[6] == 0xFF);
-    send_pair(0.3, 0.4); drain(); assert(hid_writes == 1);   // an unchanged value is not resent
-    send_pair(0, 0); drain(); assert(hid_writes == 2 && hid_last[4] == 0 && hid_last[5] == 0);
-    send_pair(0.6, 0); drain(); assert(hid_writes == 3 && hid_last[4] == 72 && hid_last[5] == 0);   // (a + a^0.35) / 2
+    assert(hid_writes == 1 && hid_last[0] == 3 && hid_last[1] == 0x0F && hid_last[4] == 30 && hid_last[5] == 40 && hid_last[6] == HID_HOLD && hid_last[8] == 0);
+    send_pair(0.3, 0.4); drain(); assert(hid_writes == 1);   // an unchanged value is not resent at once
+    usleep(600000); drain(); assert(hid_writes == 2 && hid_last[4] == 30 && hid_last[5] == 40);   // but sent again before its 1 s report runs out
+    send_pair(0, 0); drain(); assert(hid_writes == 3 && hid_last[4] == 0 && hid_last[5] == 0);
+    usleep(600000); drain(); assert(hid_writes == 3);   // silence is not refreshed, and the stop ended the old value's chain
+    send_pair(0.6, 0); drain(); assert(hid_writes == 4 && hid_last[4] == 60 && hid_last[5] == 0);   // linear, as Core Haptics' intensity
+    dispatch_suspend(queue);   // states that come faster than the reports go out: only the newest is written
+    for (int i = 1; i <= 50; i++) { dm_vibration_update u[] = {{0, 0, {i / 100.0f, 160, 0, 320}}, {0, 1, {0, 160, 0, 320}}}; dm_haptics_send(u, 2); }
+    { dm_vibration_update u[] = {{0, 0, {0, 160, 0, 320}}, {0, 1, {0, 160, 0, 320}}}; dm_haptics_send(u, 2); }
+    dispatch_resume(queue); drain(); assert(hid_writes == 5 && hid_last[4] == 0 && hid_last[5] == 0);
+    send_pair(0.6, 0); drain(); assert(hid_writes == 6 && hid_last[4] == 60);
     dm_haptics_apple_controller(0, nil); drain();   // disconnect discards the controller factory and its old callbacks
-    assert(hid_writes == 4 && hid_last[4] == 0);   // and stops the HID motors
+    assert(hid_writes == 7 && hid_last[4] == 0);   // and stops the HID motors
     assert(!(dm_haptics_available() & 1));
     TestController *unsupported = [TestController new]; unsupported.haptics = [TestHaptics new];
     unsupported.haptics.supportedLocalities = [NSSet set];
     dm_haptics_apple_controller(0, (id)unsupported); drain();
     assert(!(dm_haptics_available() & 1) && unsupported.haptics.attempts == 0);
     dm_haptics_apple_shutdown();
-    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, the default-locality and HID report fallbacks on a lost helper connection and stale callbacks passed");
+    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, the default-locality and HID report fallbacks, the HID report refresh and newest-only reports on a lost helper connection and stale callbacks passed");
 } }

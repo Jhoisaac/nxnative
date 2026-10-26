@@ -347,6 +347,9 @@ static uint32_t vib_targets(uint32_t h) {
     int p = player_of(id);
     return dm_haptics_available() & (p == 0 ? 1u | merged_players() : 1u << p);
 }
+// DM_RUMBLE_LOG=1 logs each vibration handle's value when the game changes it
+static int vib_log = -1;
+static struct { int used; uint32_t h; dm_vibration v; } vib_seen[16];
 static void vib_send(const uint32_t *handles, const dm_vibration *values, int n) {
     if (!handles || !values || n <= 0) return;
     dm_vibration_update updates[DM_PLAYERS * 2];
@@ -361,6 +364,14 @@ static void vib_send(const uint32_t *handles, const dm_vibration *values, int n)
     int count = 0;
     for (int k = 0; k < DM_PLAYERS * 2; k++) if (used >> k & 1) updates[count++] = updates[k];
     dm_haptics_send(updates, count);
+    if (vib_log < 0) { const char *e = getenv("DM_RUMBLE_LOG"); vib_log = e && *e && *e != '0'; }
+    if (vib_log) for (int i = 0; i < n; i++) {   // each handle's value when it changes
+        int s = 0; while (s < 16 && vib_seen[s].used && vib_seen[s].h != handles[i]) s++;
+        if (s == 16 || (vib_seen[s].used && !memcmp(&vib_seen[s].v, &values[i], sizeof values[i]))) continue;
+        vib_seen[s].used = 1; vib_seen[s].h = handles[i]; vib_seen[s].v = values[i];
+        LOG("rumble: %.3f s handle 0x%x (players 0x%x): low %.3f at %.0f Hz, high %.3f at %.0f Hz", guest_ns() / 1e9, handles[i], vib_targets(handles[i]),
+            values[i].amplitude_low, values[i].frequency_low, values[i].amplitude_high, values[i].frequency_high);
+    }
 }
 HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "vibration permission: enabled and an output available", unsigned, h_hid_VibPermit, void) { return dm_haptics_available() != 0; }
 HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "vibration devices of the connected controller",
