@@ -18,7 +18,7 @@
 #   a:<name>=<slot>:<type>                       a vertex input, [[attribute(slot)]]
 #   u:<name>=<offset>:<type>:<count>:<stride>    a member of the default uniform block (count 0 = not an array)
 #   b:<slot>:<size>                              the default uniform block: its buffer slot and size in bytes
-#   t:<name>=<slot>:<type>                       a combined sampler: texture and sampler slot
+#   t:<name>=<slot>:<type>                       a combined sampler: texture and sampler slot (an element of a sampler array is one, named <name>[<k>])
 #   o:<name>=<location>                          a fragment output, [[color(location)]]
 # <TAB> where it came from
 # Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]   (input paths: the RomFS, the main NSO, capture folders)
@@ -68,7 +68,9 @@ def sources(roots):
 # NVIDIA's GLSL compiler accepts more than the GLSL ES 3.20 specification, and glslang does not; these fix-ups run on the preprocessed text (glslang -E, so macros are expanded):
 #   · the GLSL ES 1.0 texture functions (89 of Digimon's fragment shaders call textureCube; with -V glslang reads textureCube as Vulkan's texture type, so a macro cannot rename it);
 #   · a redeclaration of gl_Position as a plain output (the built-in sprite shader of main declares `out float4 vPosition;` with vPosition defined as gl_Position);
-#   · textureOffset with an offset that is not a constant (the built-in FXAA shader): Metal's sample offsets are constants too, so it becomes texture at P + offset / level 0 size
+#   · textureOffset with an offset that is not a constant (the built-in FXAA shader): Metal's sample offsets are constants too, so it becomes texture at P + offset / level 0 size;
+#   · `#version 300 es` (Scaleform's GL layer in Naruto STORM 4): glslang makes SPIR-V only from GLSL ES 3.10 or later, and 3.10 is a superset of 3.00, so it compiles as 3.10
+# A sampler array indexed only by constants (Scaleform's tex[2] .. tex[4]) becomes one sampler per element, <name>__<k> (unroll_samplers): under --amb glslang gives an array one binding, and the next sampler's binding then falls inside the array's Metal slots
 OLD_TEX = [(r'\btexture2DLod\s*\(', 'textureLod('), (r'\btextureCubeLod\s*\(', 'textureLod('), (r'\btexture2DProj\s*\(', 'textureProj('),
            (r'\btexture2D\s*\(', 'texture('), (r'\btextureCube\s*\(', 'texture(')]
 
@@ -85,6 +87,7 @@ def call_args(t, i):
     raise ValueError('unbalanced parentheses')
 
 def fixups(t):
+    t = re.sub(r'^([ \t]*#[ \t]*version[ \t]+)300([ \t]+es\b)', r'\g<1>310\g<2>', t, count=1, flags=re.M)
     for a, b in OLD_TEX: t = re.sub(a, b, t)
     t = re.sub(r'^[ \t]*out\s+(?:highp\s+|mediump\s+|lowp\s+)?vec4\s+gl_Position\s*;', '', t, flags=re.M)
     out, i = [], 0
@@ -96,6 +99,19 @@ def fixups(t):
             out.append(t[i:m.start()] + f'texture({s_}, ({p_}) + vec2({o_}) / vec2(textureSize({s_}, 0)))'); i = end
     return ''.join(out) + t[i:]
 
+SAMP_ARR = re.compile(r'^([ \t]*uniform\s+(?:(?:lowp|mediump|highp)\s+)?)(sampler\w+)\s+(\w+)\s*\[\s*(\d+)\s*\]\s*;', re.M)
+
+def unroll_samplers(t):
+    """(text, {element sampler: GL name}) with each sampler array split into its elements, or an error string when one is indexed by a variable"""
+    names = {}
+    for m in list(SAMP_ARR.finditer(t)):
+        lead, ty, nm, n = m.group(1), m.group(2), m.group(3), int(m.group(4))
+        t = t.replace(m.group(0), '\n'.join(f'{lead}{ty} {nm}__{k};' for k in range(n)), 1)
+        t = re.sub(rf'\b{nm}\s*\[\s*(?:int\s*\(\s*)?(\d+)(?:\.0*)?\s*\)?\s*\]', lambda x: f'{nm}__{x.group(1)}', t)
+        if re.search(rf'\b{nm}\s*\[', t): return f'sampler array {nm} indexed by a variable'
+        names.update({f'{nm}__{k}': f'{nm}[{k}]' for k in range(n)})
+    return t, names
+
 def glsl_type(t, refl):
     return refl['types'][t]['name'] if t in refl.get('types', {}) else t
 
@@ -106,7 +122,9 @@ def translate(src, stage, key, tmp):
     r = subprocess.run(['glslangValidator', '-E', '-S', stage, g + '.in'], capture_output=True, text=True)
     if r.returncode: return 'glslang -E: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
     pre = r.stdout[r.stdout.find('#version'):]   # warnings come first
-    open(g, 'w').write(fixups(pre))
+    u = unroll_samplers(fixups(pre))
+    if isinstance(u, str): return u
+    open(g, 'w').write(u[0]); snames = u[1]
     r = subprocess.run(['glslangValidator', '-V', '-R', '--aml', '--amb', '-S', stage, g, '-o', spv], capture_output=True, text=True)
     if r.returncode: return 'glslang: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
     refl = json.loads(subprocess.run(['spirv-cross', spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
@@ -139,7 +157,7 @@ def translate(src, stage, key, tmp):
             f.append(f'u:{mb["name"]}={mb["offset"]}:{ty}:{arr[0] if arr else 0}:{mb.get("array_stride", 0)}')
     for t in refl.get('textures', []):
         if t.get('array'): return f'sampler array {t["name"]}'
-        f.append(f't:{t["name"]}={t["binding"]}:{t["type"]}')
+        f.append(f't:{snames.get(t["name"], t["name"])}={t["binding"]}:{t["type"]}')
     for k in ('separate_images', 'separate_samplers', 'images', 'ssbos', 'push_constants'):
         if refl.get(k): return f'{k} are not implemented'
     if any(int(x) > 15 for x in re.findall(r'\[\[(?:sampler|buffer)\((\d+)\)\]\]', m)): return 'a buffer or sampler slot above 15'
@@ -188,7 +206,7 @@ def main():
         for key, where, errs in failed:
             if not any(k == key for k, _ in seen): print(f'[RED] {where} ({key}) does not translate: {" / ".join(errs)}')
         tsv = ['# GL shaders (dm/gfx/tools/gl_shaders.py): key = sha256(GLSL source)[:16], Metal function gl_<key>_v / gl_<key>_f; a: vertex inputs, u: default uniform block members '
-               '(offset:type:count:stride), b: the block (slot:size), t: combined samplers (slot:type), o: fragment outputs',
+               '(offset:type:count:stride), b: the block (slot:size), t: combined samplers (slot:type; an array element is named name[k]), o: fragment outputs',
                '# ' + ' '.join(subprocess.run(['glslangValidator', '--version'], capture_output=True, text=True).stdout.split()[:3]) + '; spirv-cross '
                + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run(['spirv-cross', '--revision'], capture_output=True, text=True)).split())]
         tsv += [f'{k[0]}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
