@@ -325,7 +325,9 @@ NAMES(vao_t, g_vaos, g_nvaos, g_capvaos)
 static vao_t g_vao0;   // the default vertex array (GL core has none, the compatibility profile does)
 
 typedef struct { GLenum type; char *src; size_t len; char key[17]; const shinfo *si; __strong id<MTLFunction> fn; int compiled; } shader_t;
-typedef struct { char name[48]; uint8_t type; uint16_t count; int32_t off[2]; uint16_t stride[2]; int slot[2]; int unit; } puni_t;   // [0] vertex, [1] fragment
+// [0] vertex, [1] fragment; a sampler array (gl_shaders.py writes a t: field per element, named name[k]) has a slot per stage and a unit for each of its first NSELEM elements
+enum { NSELEM = 8 };
+typedef struct { char name[48]; uint8_t type; uint16_t count; int32_t off[2]; uint16_t stride[2]; int slot[2][NSELEM]; int unit[NSELEM]; } puni_t;
 typedef struct { uint32_t vf[16]; uint16_t stride[16]; uint8_t div[16]; uint32_t cpf, dpf, spf; uint8_t blend, mask, bsrc, bdst, bsa, bda, eqc, eqa; } pkey_t;
 typedef struct { pkey_t k; void *pso; } pent_t;   // pso: a retained id<MTLRenderPipelineState>, NULL = failed
 // amap: the game's attribute index of each Metal vertex input (glBindAttribLocation before the link, else the input's own number, which glGetAttribLocation returns);
@@ -890,16 +892,18 @@ static void bind_uniforms_textures(prog_t *p) {
     for (int i = 0; i < p->nu; i++) {
         puni_t *u = &p->u[i];
         if (!is_samp(u->type)) continue;
-        int unit = u->unit < 0 || u->unit >= NUNITS ? 0 : u->unit;
         GLenum target = u->type == T_SAMPCUBE ? GL_TEXTURE_CUBE_MAP : u->type == T_SAMP3D ? GL_TEXTURE_3D : u->type == T_SAMP2DARR ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
-        tex_t *t = tex_of(*unit_slot(unit, target));
-        id<MTLTexture> tx = nil; id<MTLSamplerState> sm = g_samp0;
-        if (t && (t->made || tex_make(t, 0)) && t->tex) { tx = t->tex; sm = tex_sampler(t); t->use = g_serial; }
-        if (!tx) tx = u->type == T_SAMPCUBE ? g_cube0 : u->type == T_SAMP3D ? g_tex3d0 : u->type == T_SAMP2DARR ? g_arr0 : g_tex0;
-        for (int st = 0; st < 2; st++) {
-            if (u->slot[st] < 0) continue;
-            if (st) { [e setFragmentTexture:tx atIndex:u->slot[st]]; [e setFragmentSamplerState:sm atIndex:u->slot[st]]; }
-            else { [e setVertexTexture:tx atIndex:u->slot[st]]; [e setVertexSamplerState:sm atIndex:u->slot[st]]; }
+        for (int el = 0; el < (u->count ? u->count : 1) && el < NSELEM; el++) {
+            int unit = u->unit[el] < 0 || u->unit[el] >= NUNITS ? 0 : u->unit[el];
+            tex_t *t = tex_of(*unit_slot(unit, target));
+            id<MTLTexture> tx = nil; id<MTLSamplerState> sm = g_samp0;
+            if (t && (t->made || tex_make(t, 0)) && t->tex) { tx = t->tex; sm = tex_sampler(t); t->use = g_serial; }
+            if (!tx) tx = u->type == T_SAMPCUBE ? g_cube0 : u->type == T_SAMP3D ? g_tex3d0 : u->type == T_SAMP2DARR ? g_arr0 : g_tex0;
+            for (int st = 0; st < 2; st++) {
+                int s = u->slot[st][el]; if (s < 0) continue;
+                if (st) { [e setFragmentTexture:tx atIndex:s]; [e setFragmentSamplerState:sm atIndex:s]; }
+                else { [e setVertexTexture:tx atIndex:s]; [e setVertexSamplerState:sm atIndex:s]; }
+            }
         }
     }
     E.prog = p->serial;
@@ -1128,6 +1132,8 @@ GL(glTexEnvi, void, GLenum t, GLenum p, GLint v) { (void)t; (void)p; (void)v; }
 GL(glGetError, GLenum, void) { return 0; }
 // Everything recorded so far runs to its end (LÖVE when the window changes)
 GLB(glFinish, void, void) { if (g_pend_clear.bits) clears_flush(); dm_gfx_enter(); id<MTLCommandBuffer> cb = cb_get(); cb_commit(); [cb waitUntilCompleted]; dm_gfx_leave(); }
+// What was recorded so far goes to the GPU, without waiting (Naruto STORM 4 flushes after each fence of its NVN / GL interop); nothing recorded, nothing to send
+GLB(glFlush, void, void) { if (g_pend_clear.bits) clears_flush(); if (g_cb) { dm_gfx_enter(); cb_commit(); dm_gfx_leave(); } }
 // Debug output and labels (LÖVE's debug groups and its GL debug callback, used when the game asks for debug output): none here
 GL(glDebugMessageCallback, void, void *cb, const void *user) { (void)cb; (void)user; }
 GL(glDebugMessageControl, void, GLenum src, GLenum type, GLenum sev, GLsizei n, const GLuint *ids, uint32_t on) { (void)src; (void)type; (void)sev; (void)n; (void)ids; (void)on; }
@@ -1138,6 +1144,12 @@ GL(glPopGroupMarkerEXT, void, void) {}
 GL(glObjectLabel, void, GLenum id, GLuint name, GLsizei len, const GLchar *label) { (void)id; (void)name; (void)len; (void)label; }
 
 // ---------- Queries ----------
+// The client API of the current context. In EGL a context takes the API bound when it is made, OPENGL_ES_API until eglBindAPI. Naruto STORM 4 makes its context before
+// eglBindAPI(OPENGL_API), so it is an OpenGL ES context: Scaleform's GL layer reads GL_VERSION as "OpenGL ES %d.%d" and loads its version-gated functions only then (glGetIntegerv
+// among them: its texture size limit stayed 0 and every image got 0 x 0). Digimon and LÖVE bind OPENGL_API first and keep the desktop answers
+static int g_ctx_es_first = -1;     // the API of the first context made (1 OpenGL ES, 0 OpenGL), for a thread with no context current
+static __thread int t_ctx_es = -1;  // the API of the context current on this thread
+static int ctx_es(void) { return t_ctx_es >= 0 ? t_ctx_es : g_ctx_es_first > 0; }
 static const char *const g_exts[] = {"GL_ARB_ES3_2_compatibility", "GL_ARB_ES3_compatibility", "GL_ARB_texture_compression_bptc", "GL_ARB_texture_compression_rgtc",
     "GL_EXT_texture_compression_s3tc", "GL_EXT_texture_filter_anisotropic", "GL_ARB_vertex_array_object", "GL_ARB_direct_state_access", "GL_ARB_half_float_vertex",
     "GL_ARB_framebuffer_object", "GL_ARB_texture_float", "GL_EXT_texture_sRGB", "GL_KHR_texture_compression_astc_ldr", "GL_NV_shadow_samplers_cube"};
@@ -1146,8 +1158,8 @@ GL(glGetString, const char *, GLenum n) {
     switch (n) {
         case GL_VENDOR: return "NVIDIA Corporation";
         case GL_RENDERER: return "NVIDIA Tegra X1 (nvgpu)/integrated (Metal)";
-        case GL_VERSION: return "4.5.0 NVIDIA 349.00";
-        case GL_SHADING_LANGUAGE_VERSION: return "4.50 NVIDIA";
+        case GL_VERSION: return ctx_es() ? "OpenGL ES 3.2 NVIDIA 349.00" : "4.5.0 NVIDIA 349.00";
+        case GL_SHADING_LANGUAGE_VERSION: return ctx_es() ? "OpenGL ES GLSL ES 3.20" : "4.50 NVIDIA";
         case GL_EXTENSIONS: {   // the compatibility profile's one string
             static char all[1024]; if (!all[0]) for (int i = 0; i < NEXTS; i++) { strlcat(all, g_exts[i], sizeof all); strlcat(all, " ", sizeof all); }
             return all;
@@ -1159,9 +1171,9 @@ GL(glGetStringi, const char *, GLenum n, GLuint i) { return n == GL_EXTENSIONS &
 GL(glGetIntegerv, void, GLenum p, GLint *v) {
     switch (p) {
         case GL_NUM_EXTENSIONS: *v = NEXTS; return;
-        case GL_MAJOR_VERSION: *v = 4; return;
-        case GL_MINOR_VERSION: *v = 5; return;
-        case GL_CONTEXT_PROFILE_MASK: *v = 1; return;   // CONTEXT_CORE_PROFILE_BIT: what the games asked for (Digimon a 4.5 core context); LÖVE takes its core paths (the file header)
+        case GL_MAJOR_VERSION: *v = ctx_es() ? 3 : 4; return;
+        case GL_MINOR_VERSION: *v = ctx_es() ? 2 : 5; return;
+        case GL_CONTEXT_PROFILE_MASK: *v = ctx_es() ? 0 : 1; return;   // CONTEXT_CORE_PROFILE_BIT: what the games asked for (Digimon a 4.5 core context); LÖVE takes its core paths (the file header)
         case GL_CONTEXT_FLAGS: *v = 0; return;
         case GL_MAX_TEXTURE_SIZE: case GL_MAX_RENDERBUFFER_SIZE: case GL_MAX_CUBE_MAP_TEXTURE_SIZE: *v = 16384; return;
         case GL_MAX_3D_TEXTURE_SIZE: case GL_MAX_ARRAY_TEXTURE_LAYERS: *v = 2048; return;
@@ -1173,6 +1185,11 @@ GL(glGetIntegerv, void, GLenum p, GLint *v) {
         case GL_MAX_VERTEX_UNIFORM_VECTORS: case GL_MAX_FRAGMENT_UNIFORM_VECTORS: *v = 1024; return;
         case GL_MAX_VARYING_VECTORS: *v = 31; return;
         case GL_MAX_SAMPLES: *v = 8; return;
+        case 0xd52: case 0xd53: case 0xd54: case 0xd55: *v = 8; return;   // RED / GREEN / BLUE / ALPHA_BITS: the window surface is RGBA8
+        case 0xd56: *v = 24; return;   // DEPTH_BITS: the configuration's depth 24 (32F here)
+        case 0xd57: *v = 8; return;    // STENCIL_BITS
+        case 0x8a34: *v = 256; return;   // UNIFORM_BUFFER_OFFSET_ALIGNMENT, as NVIDIA's drivers report it
+        case 0x8dfa: *v = 1; return;   // SHADER_COMPILER
         case GL_SAMPLE_BUFFERS: case GL_SAMPLES: *v = 0; return;   // the window surface is not multisampled
         case GL_VIEWPORT: memcpy(v, S.vp, sizeof S.vp); return;
         case GL_SCISSOR_BOX: memcpy(v, S.sc, sizeof S.sc); return;
@@ -1268,13 +1285,44 @@ GL(glFlushMappedBufferRange, void, GLenum target, GLintptr off, GLsizeiptr len) 
 // ---------- Sync objects ----------
 // A fence is the serial of the command buffer being recorded when it was made, signalled when that command buffer completes (g_ev). LÖVE fences each third of its stream
 // buffers at the end of a frame and waits for the fence three frames later, before it writes that third again
-typedef struct { uint64_t serial; } sync_t;
-GL(glFenceSync, void *, GLenum cond, GLbitfield flags) { (void)cond; (void)flags; sync_t *s = zalloc(sizeof *s); s->serial = g_serial; return s; }
-GL(glDeleteSync, void, void *s) { free(s); }
-GL(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) { (void)s; (void)flags; (void)timeout; }   // a GPU-side wait: the command buffers run in order
+// The layer keeps the syncs it made in a list: deleting or waiting on anything else is GL_INVALID_VALUE in GL, ignored here (Naruto STORM 4 deletes the sync of an NVN / GL interop
+// slot it never fenced, whose memory holds garbage)
+typedef struct sync_s { uint64_t serial, nvn; struct sync_s *next; } sync_t;   // nvn: the NVN fence of a sync made from an NVN sync (nvnSyncCreateGLSync), 0 none
+static sync_t *g_syncs; static pthread_mutex_t g_sync_mu = PTHREAD_MUTEX_INITIALIZER;
+static sync_t *sync_new(uint64_t serial) { sync_t *s = zalloc(sizeof *s); s->serial = serial; pthread_mutex_lock(&g_sync_mu); s->next = g_syncs; g_syncs = s; pthread_mutex_unlock(&g_sync_mu); return s; }
+static int sync_live(const void *p) { pthread_mutex_lock(&g_sync_mu); sync_t *s = g_syncs; while (s && s != p) s = s->next; pthread_mutex_unlock(&g_sync_mu); return s != NULL; }
+GL(glFenceSync, void *, GLenum cond, GLbitfield flags) { (void)cond; (void)flags; return sync_new(g_serial); }
+GL(glDeleteSync, void, void *p) {
+    pthread_mutex_lock(&g_sync_mu);
+    for (sync_t **l = &g_syncs; *l; l = &(*l)->next) if (*l == p) { *l = (*l)->next; free(p); break; }
+    pthread_mutex_unlock(&g_sync_mu);
+}
+// A GL sync made from an NVN sync (hle_nvn.c nvnSyncCreateGLSync, NVN / GL interop): signalled once the NVN queue has completed up to fence (0: already)
+void *dm_gl_sync_nvn(uint64_t fence) { sync_t *s = sync_new(0); s->nvn = fence; return s; }
+// NVN / GL interop (hle_nvn.c nvnSyncInitializeFromFencedGLSync): the serial a GL sync waits for, its command buffer committed if it is still being recorded (as glFlush); 0 for no sync of this layer's
+uint64_t dm_gl_sync_flush(const void *sy) {
+    const sync_t *s = sy;
+    if (!s || !sync_live(s)) return 0;
+    if (s->serial >= g_serial) { dm_gfx_enter(); cb_commit(); dm_gfx_leave(); }
+    return s->serial;
+}
+// Wait until the GL command buffers up to serial s are done (hle_nvn.c nvnQueueWaitSync / nvnSyncWait on a sync made from a GL sync); timeout in ns, ~0 for none; 1 when done
+int dm_gl_wait(uint64_t s, uint64_t timeout_ns) {
+    if (!s || g_ev.signaledValue >= s) return 1;
+    if (!timeout_ns) return 0;
+    uint64_t ms = timeout_ns == ~0ull ? UINT64_MAX : timeout_ns / 1000000;
+    return [g_ev waitUntilSignaledValue:s timeoutMS:ms ? ms : 1];
+}
+// A GPU-side wait: the layer's command buffers run in order. One on an NVN fence waits here on the CPU, as the GL queue cannot wait for the NVN queue's fences (Naruto STORM 4 draws
+// its UI again into the interop texture only after NVN has copied it out; without the wait, NVN copied a cleared texture about every other frame); bounded, should the fence's commands not be sent yet
+GL(glWaitSync, void, void *sy, GLbitfield flags, uint64_t timeout) {
+    (void)flags; (void)timeout; sync_t *s = sy;
+    if (s && sync_live(s) && s->nvn && !mtl_wait(s->nvn, 100000000ull)) RED1("glWaitSync: NVN fence %llu not reached in 100 ms, not waited for", (unsigned long long)s->nvn);
+}
 GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
     sync_t *s = sy;
-    if (!s) return 0x911d;   // WAIT_FAILED
+    if (!s || !sync_live(s)) return 0x911d;   // WAIT_FAILED (not a sync of this layer's)
+    if (s->nvn) return mtl_wait(s->nvn, 0) ? GL_ALREADY_SIGNALED : timeout_ns && mtl_wait(s->nvn, timeout_ns) ? GL_CONDITION_SATISFIED : GL_TIMEOUT_EXPIRED;
     if (g_ev.signaledValue >= s->serial) return GL_ALREADY_SIGNALED;
     if (s->serial >= g_serial) {   // its command buffer is still being recorded: commit it now (as GL_SYNC_FLUSH_COMMANDS_BIT asks; without it the wait could never end)
         if (!timeout_ns && !(flags & GL_SYNC_FLUSH_COMMANDS_BIT)) return GL_TIMEOUT_EXPIRED;
@@ -1284,6 +1332,24 @@ GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
     uint64_t ms = timeout_ns / 1000000;
     return [g_ev waitUntilSignaledValue:s->serial timeoutMS:ms ? ms : 1] ? GL_CONDITION_SATISFIED : GL_TIMEOUT_EXPIRED;
 }
+// A sync's state (Scaleform's GL layer polls GL_SYNC_STATUS): OBJECT_TYPE 0x9112, SYNC_CONDITION 0x9113, SYNC_STATUS 0x9114, SYNC_FLAGS 0x9115
+GLB(glGetSynciv, void, void *sy, GLenum p, GLsizei n, GLsizei *len, GLint *v) {
+    sync_t *s = sy; GLint r;
+    if (!s || !sync_live(s) || n < 1 || !v) { if (len) *len = 0; return; }
+    switch (p) {
+        case 0x9112: r = 0x9116; break;   // SYNC_FENCE
+        case 0x9113: r = 0x9117; break;   // SYNC_GPU_COMMANDS_COMPLETE
+        case 0x9114: r = (s->nvn ? mtl_wait(s->nvn, 0) : g_ev.signaledValue >= s->serial) ? 0x9119 : 0x9118; break;   // SIGNALED / UNSIGNALED
+        case 0x9115: r = 0; break;
+        default: RED1("glGetSynciv(%#x) not implemented", p); if (len) *len = 0; return;
+    }
+    *v = r; if (len) *len = 1;
+}
+GL(glIsProgram, uint32_t, GLuint p) { return prog_of(p) != NULL; }
+GL(glIsFramebuffer, uint32_t, GLuint f) { return fb_of(f) != NULL; }
+// Sampler objects: none here, each texture samples with its own parameters, which is what binding sampler 0 asks for (Scaleform's GL layer unbinds them so)
+GL(glBindSampler, void, GLuint unit, GLuint s) { if (s) RED1("glBindSampler(%u, %u): sampler objects are not implemented, the texture's own parameters are used", unit, s); }
+GL(glReleaseShaderCompiler, void, void) {}   // a hint that the compiler may free its resources: nothing to free here
 GL(glGenVertexArrays, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_vaos, &g_nvaos, &g_capvaos, sizeof(vao_t)); }
 GL(glDeleteVertexArrays, void, GLsizei n, const GLuint *v) { for (GLsizei i = 0; i < n; i++) if (v[i] && v[i] < g_nvaos && g_vaos[v[i]]) { free(g_vaos[v[i]]); g_vaos[v[i]] = NULL; if (S.vao == v[i]) S.vao = 0; } }
 GL(glBindVertexArray, void, GLuint v) { S.vao = v; }
@@ -1402,6 +1468,10 @@ static void tex_storage(GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, G
     t->fmt = f; t->w = w; t->h = h; t->d = d; t->slevels = levels; t->smp_dirty = 1;
 }
 GL(glTexStorage2D, void, GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h) { tex_storage(target, levels, ifmt, w, h, 1); }
+// A GL texture's size when it has RGBA8 storage, for nvnTextureBuilderSetGLTextureName (hle_nvn.c, NVN / GL interop); 0 otherwise
+int dm_gl_tex_rgba8(uint32_t name, int *w, int *h) { tex_t *t = tex_of(name); if (!t || t->fmt != F_RGBA8 || !t->w || !t->h) return 0; *w = (int)t->w; *h = (int)t->h; return 1; }
+// A GL texture's Metal texture, made now (as a render target) if it is not yet, for nvnTextureInitialize (hle_nvn.c, NVN / GL interop): NVN samples what GL draws into it
+void *dm_gl_tex_mtl(uint32_t name) { tex_t *t = tex_of(name); if (!t || !tex_make(t, 1)) return NULL; return (__bridge void *)t->tex; }
 GL(glTexStorage3D, void, GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h, GLsizei d) { tex_storage(target, levels, ifmt, w, h, d); }
 // 3D and array textures (LÖVE makes a 1x1x1 one of each at start for its default textures): data through glTexSubImage3D, a layer (or a 3D slice) at a time.
 // glTexSubImage3D's last three arguments are on the stack: 64-bit here, so the Apple and AAPCS64 stack layouts agree
@@ -1668,12 +1738,14 @@ GLB(glLinkProgram, void, GLuint pr) {
         const shinfo *si = p->si[st];
         p->ub[st] = zalloc(si->ub_size + 16);
         for (int i = 0; i < si->nu + si->nt; i++) {
-            const char *nm = i < si->nu ? si->u[i].name : si->t[i - si->nu].name;
+            char nm[48]; strlcpy(nm, i < si->nu ? si->u[i].name : si->t[i - si->nu].name, sizeof nm);
+            int el = -1; char *br = i < si->nu ? NULL : strchr(nm, '[');   // a sampler array's element: merged into one uniform named as the array
+            if (br) { el = atoi(br + 1); *br = 0; if (el >= NSELEM) { RED1("program %u: sampler %s[%d] is past the %d elements kept", pr, nm, el, NSELEM); continue; } }
             puni_t *u = NULL;
             for (int j = 0; j < p->nu; j++) if (!strcmp(p->u[j].name, nm)) u = &p->u[j];
-            if (!u) { u = &p->u[p->nu++]; strlcpy(u->name, nm, sizeof u->name); u->off[0] = u->off[1] = -1; u->slot[0] = u->slot[1] = -1; }
+            if (!u) { u = &p->u[p->nu++]; strlcpy(u->name, nm, sizeof u->name); u->off[0] = u->off[1] = -1; for (int k = 0; k < NSELEM; k++) u->slot[0][k] = u->slot[1][k] = -1; }
             if (i < si->nu) { const shuni *m = &si->u[i]; u->type = m->type; u->count = m->count; u->off[st] = m->off; u->stride[st] = m->stride; }
-            else { const shsamp *m = &si->t[i - si->nu]; u->type = m->type; u->slot[st] = m->slot; }
+            else { const shsamp *m = &si->t[i - si->nu]; u->type = m->type; u->slot[st][el < 0 ? 0 : el] = m->slot; if (el >= u->count) u->count = (uint16_t)(el + 1); }
         }
     }
     // the game's attribute indices: glBindAttribLocation's for the inputs it names, the input's own number for the others (or the lowest index no binding took)
@@ -1750,7 +1822,7 @@ static void uni_write(GLint loc, GLsizei count, const void *v, int comps, int is
     int i = loc / 4096, el = loc % 4096;
     if (i >= p->nu) return;
     puni_t *u = &p->u[i];
-    if (is_samp(u->type)) { if (is_int) u->unit = *(const GLint *)v; return; }
+    if (is_samp(u->type)) { if (is_int) for (GLsizei k = 0; k < count && el + k < NSELEM; k++) u->unit[el + k] = ((const GLint *)v)[k]; return; }
     int n = u->count ? u->count : 1, rows = cols ? comps / cols : comps, size = cols ? cols * 16 : 16;
     if (el + count > n) count = n - el;
     for (int st = 0; st < 2; st++) {
@@ -1808,7 +1880,7 @@ static void uni_read(GLuint pr, GLint loc, void *out, int as_int) {
     prog_t *p = prog_of(pr);
     if (!p || !p->linked || loc < 0 || loc / 4096 >= p->nu) return;
     const puni_t *u = &p->u[loc / 4096]; int el = loc % 4096;
-    if (is_samp(u->type)) { if (as_int) *(GLint *)out = u->unit; else *(GLfloat *)out = (GLfloat)u->unit; return; }
+    if (is_samp(u->type)) { int un = u->unit[el < NSELEM ? el : 0]; if (as_int) *(GLint *)out = un; else *(GLfloat *)out = (GLfloat)un; return; }
     int st = u->off[0] >= 0 ? 0 : 1; if (u->off[st] < 0) return;
     int cols = u->type == T_MAT4 ? 4 : u->type == T_MAT3 ? 3 : u->type == T_MAT2 ? 2 : 0, rows = cols ? cols : tcomps(u->type);
     const uint8_t *d = p->ub[st] + u->off[st] + (size_t)el * (u->stride[st] ? u->stride[st] : cols ? cols * 16 : 16);
@@ -1853,7 +1925,8 @@ EGL(eglInitialize, EGLBoolean, EGLDisplay d, EGLint *major, EGLint *minor) { (vo
 EGL(eglTerminate, EGLBoolean, EGLDisplay d) { (void)d; return EGL_TRUE; }
 EGL(eglReleaseThread, EGLBoolean, void) { return EGL_TRUE; }
 // SDL binds 0 (its API before it has chosen one) when it makes the window again (Balatro's love.window.setMode): nothing to change
-EGL(eglBindAPI, EGLBoolean, EGLenum api) { if (api && api != 0x30a2) RED1("eglBindAPI(%#x): only desktop OpenGL (0x30a2) is implemented", api); return EGL_TRUE; }
+static EGLenum g_api = 0x30a0;   // the bound client API: OPENGL_ES_API until eglBindAPI, as in EGL
+EGL(eglBindAPI, EGLBoolean, EGLenum api) { if (api == 0x30a0 || api == 0x30a2) g_api = api; else if (api) RED1("eglBindAPI(%#x): only OpenGL (0x30a2) and OpenGL ES (0x30a0) are implemented", api); return EGL_TRUE; }
 // One configuration: RGBA8, depth 24 (32F here), stencil 8, a window surface, desktop OpenGL; it matches the game's attributes
 EGL(eglChooseConfig, EGLBoolean, EGLDisplay d, const EGLint *attr, EGLConfig *cfg, EGLint n, EGLint *num) {
     (void)d; (void)attr;
@@ -1885,7 +1958,7 @@ EGL(eglQueryString, const char *, EGLDisplay d, EGLint name) {
     return NULL;
 }
 EGL(eglGetError, EGLint, void) { return 0x3000; }   // SUCCESS
-EGL(eglQueryAPI, EGLenum, void) { return 0x30a2; }   // OPENGL_API
+EGL(eglQueryAPI, EGLenum, void) { return g_api; }
 EGL(eglWaitNative, EGLBoolean, EGLint engine) { (void)engine; return EGL_TRUE; }
 EGL(eglWaitGL, EGLBoolean, void) { return EGL_TRUE; }
 EGL(eglDestroyContext, EGLBoolean, EGLDisplay d, EGLContext c) { (void)d; (void)c; return EGL_TRUE; }
@@ -1893,9 +1966,11 @@ EGL(eglCreatePbufferSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, const EGLi
 EGL(eglCreateContext, EGLContext, EGLDisplay d, EGLConfig cfg, EGLContext share, const EGLint *attr) {
     (void)d; (void)cfg;
     int major = 0, minor = 0; for (int i = 0; attr && attr[i] != 0x3038 && i < 32; i += 2) { if (attr[i] == 0x3098) major = attr[i + 1]; else if (attr[i] == 0x30fb) minor = attr[i + 1]; }
-    if (share) RED1("shared EGL contexts are not implemented (one context)");
-    GLOG("EGL context: OpenGL %d.%d", major, minor);
-    return (EGLContext)(uintptr_t)2;
+    // Every context shares the one set of object tables of this layer. A context made with a share context takes that context's API, as EGL keeps one API in a share group:
+    // Naruto STORM 4 makes its second context (for its NVN / GL interop thread, where Scaleform reads GL_VERSION) after eglBindAPI(OPENGL_API), shared with its first, an OpenGL ES one
+    int es = share ? (uintptr_t)share == 6 : g_api == 0x30a0; if (g_ctx_es_first < 0) g_ctx_es_first = es;
+    GLOG("EGL context: OpenGL %s%d.%d", es ? "ES " : "", major, minor);
+    return (EGLContext)(uintptr_t)(es ? 6 : 2);   // the handle tells eglMakeCurrent the context's API
 }
 EGL(eglCreateWindowSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, void *win, const EGLint *attr) {
     (void)d; (void)cfg; (void)win; (void)attr; dev_init();
@@ -1909,6 +1984,7 @@ EGL(eglCreateWindowSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, void *win, 
 EGL(eglDestroySurface, EGLBoolean, EGLDisplay d, EGLSurface s) { (void)d; (void)s; return EGL_TRUE; }
 EGL(eglMakeCurrent, EGLBoolean, EGLDisplay d, EGLSurface dr, EGLSurface rd, EGLContext c) {
     (void)d; (void)rd;
+    t_ctx_es = c ? (uintptr_t)c == 6 : -1;
     static pthread_t th; static int known, sized;
     if (c && dr) { pthread_t me = pthread_self(); if (!known || !pthread_equal(th, me)) { th = me; known = 1; OLOG("context current on a new thread"); } }
     // a context's viewport and scissor box start as its first drawable's size (LÖVE reads them back at start)
