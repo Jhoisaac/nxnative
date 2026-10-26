@@ -8913,6 +8913,8 @@ uint64_t mtl_ext_tex(void *tex) {
     static _Atomic uint64_t n; id<MTLTexture> t = (__bridge id<MTLTexture>)tex; uint64_t ser = (1ull << 62) + atomic_fetch_add(&n, 1) + 1;
     res_add(t); serial_put(ser, t); mtl_xv_window_tex(ser); return ser;
 }
+// An NVN texture that is another layer's texture (NVN / GL interop): its serial resolves to that texture, resident for the Metal 4 queue, never collected by the cross-submit ledger
+void mtl_tex_bind(uint64_t serial, void *tex) { id<MTLTexture> t = (__bridge id<MTLTexture>)tex; res_add(t); serial_put(serial, t); mtl_xv_window_tex(serial); }
 // Present an external texture after the producer's event reaches ev_val (its rendering of the frame is done); returns the ticket for mtl_present_wait
 uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]) {
     tex_t t; memset(&t, 0, sizeof t); t.magic = MAGIC('T', 'E', 'X', 0); t.serial = serial;

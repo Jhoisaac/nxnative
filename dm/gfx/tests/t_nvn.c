@@ -355,6 +355,19 @@ int main(void) {
     EXPECT("wait on an unfenced sync = timeout (2)", 2, P(nvnSyncWait)(&s1, 0));
     P(nvnQueueFenceSync)(&q, &s1, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
     EXPECT("wait after fence = already signaled (0)", 0, P(nvnSyncWait)(&s1, 0));
+    {   // NVN / GL interop (Naruto STORM 4): an NVN sync made from a fenced GL sync is signalled; without the GL layer (this test links none) nvnSyncCreateGLSync gives no GL sync
+        NVNsync sg; void *gls = (void *)1;
+        NVNboolean (*init_gl)(NVNsync *, NVNdevice *, const void *) = (NVNboolean (*)(NVNsync *, NVNdevice *, const void *))proc("nvnSyncInitializeFromFencedGLSync");
+        NVNboolean (*create_gl)(const NVNsync *, void **) = (NVNboolean (*)(const NVNsync *, void **))proc("nvnSyncCreateGLSync");
+        EXPECT("sync from a fenced GL sync: initialized (1)", 1, init_gl(&sg, &dev, (const void *)0x10));
+        EXPECT("sync from a fenced GL sync = signaled (0)", 0, P(nvnSyncWait)(&sg, 0));
+        EXPECT("queue wait on a sync from a GL sync without the GL layer: returns (1)", 1, P(nvnQueueWaitSync)(&q, &sg));
+        EXPECT("GL sync without the GL layer: fails (0)", 0, create_gl(&sg, &gls));
+        EXPECT("GL sync without the GL layer: none (0)", 0, gls != NULL);
+        NVNtextureBuilder gb; P(nvnTextureBuilderSetDevice)(&gb, &dev); P(nvnTextureBuilderSetDefaults)(&gb);
+        ((void (*)(NVNtextureBuilder *, uint32_t))proc("nvnTextureBuilderSetGLTextureName"))(&gb, 1);
+        EXPECT("builder from a GL texture without the GL layer: format kept (0)", 0, (long long)P(nvnTextureBuilderGetFormat)(&gb));
+    }
     NVNtexture sc[2]; NVNtextureBuilder tb; P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb);
     P(nvnTextureBuilderSetWidth)(&tb, 1280); P(nvnTextureBuilderSetHeight)(&tb, 720); P(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_RGBA8);
     P(nvnTextureBuilderSetStorage)(&tb, &pool, 0); P(nvnTextureInitialize)(&sc[0], &tb); P(nvnTextureInitialize)(&sc[1], &tb);

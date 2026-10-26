@@ -293,6 +293,14 @@ NVN(nvnTextureBuilderSetFormat, void, NVNtextureBuilder *b, NVNformat f) { TB(b)
 NVN(nvnTextureBuilderSetSamples, void, NVNtextureBuilder *b, int s) { TB(b)->d.samples = s; }
 NVN(nvnTextureBuilderSetStride, void, NVNtextureBuilder *b, ptrdiff_t s) { TB(b)->d.stride = (uint32_t)s; }
 NVN(nvnTextureBuilderSetStorage, void, NVNtextureBuilder *b, NVNmemoryPool *p, ptrdiff_t off) { TB(b)->pool = (pool_t *)p; TB(b)->off = off; }
+// NVN / GL interop (Naruto STORM 4): a texture made from a GL texture takes that texture's size and format, and at TextureInitialize its Metal texture (dm_gl_tex_mtl), so NVN samples what GL draws into it
+__attribute__((weak)) int dm_gl_tex_rgba8(uint32_t name, int *w, int *h) { (void)name; (void)w; (void)h; return 0; }   // dm/gfx/gl/hle_gl.m
+__attribute__((weak)) void *dm_gl_tex_mtl(uint32_t name) { (void)name; return NULL; }   // dm/gfx/gl/hle_gl.m
+NVN(nvnTextureBuilderSetGLTextureName, void, NVNtextureBuilder *b, uint32_t name) {
+    int w, h;
+    if (!dm_gl_tex_rgba8(name, &w, &h)) { LOG("[RED] TextureBuilderSetGLTextureName: GL texture %u has no RGBA8 storage", name); return; }
+    TB(b)->d.target = NVN_TEXTURE_TARGET_2D; TB(b)->d.width = w; TB(b)->d.height = h; TB(b)->d.depth = 1; TB(b)->d.levels = 1; TB(b)->d.format = NVN_FORMAT_RGBA8; TB(b)->gl_name = name;
+}
 NVN(nvnTextureBuilderSetPackagedTextureLayout, void, NVNtextureBuilder *b, const NVNpackagedTextureLayout *l) {
     TB(b)->has_layout = l != NULL; if (l) memcpy(TB(b)->layout, l->layout, 8);
     TB(b)->d.pkg_block_h = l ? l->layout[0] + 1 : 0;
@@ -445,6 +453,11 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     nvn_tex_layout(&o->d, &o->L);
     o->mem = s->pool && s->pool->mem ? s->pool->mem + s->off : NULL;
     o->serial = nvn_new_serial(); mtl_tex_init(o);
+    if (s->gl_name) {   // NVN / GL interop: the GL texture's Metal texture, not storage of its own (a pool given too is not read)
+        void *mt = dm_gl_tex_mtl(s->gl_name);
+        if (mt) { o->pool = NULL; o->mem = NULL; o->off = 0; o->has_layout = 0; mtl_tex_bind(o->serial, mt); }
+        else LOG("[RED] TextureInitialize: GL texture %u has no Metal texture, the NVN texture has storage of its own", s->gl_name);
+    }
     {   // DM_NVN_TEXINFO=WxH also logs every texture of that size as it is initialized (render targets included): which ones share storage, and how their descriptions differ
         static int ti = -1; static uint32_t tw, th;
         if (ti < 0) { const char *e = getenv("DM_NVN_TEXINFO"); ti = e && sscanf(e, "%ux%u", &tw, &th) == 2; }
@@ -624,6 +637,8 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
 }
 
 // ---------- Sync / events ----------
+__attribute__((weak)) uint64_t dm_gl_sync_flush(const void *gl) { (void)gl; return 0; }   // dm/gfx/gl/hle_gl.m
+__attribute__((weak)) int dm_gl_wait(uint64_t serial, uint64_t timeout_ns) { (void)serial; (void)timeout_ns; return 1; }   // dm/gfx/gl/hle_gl.m
 NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), 0, 0}; return 1; }
 NVN(nvnSyncFinalize, void, NVNsync *s) { ((sync_t *)s)->magic = 0; }
 NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
@@ -631,16 +646,27 @@ NVN(nvnSyncSetDebugLabel, void, NVNsync *s, const char *l) { (void)s; (void)l; }
 NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = mtl_last_fence(); }
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 // A GPU-side wait on a sync: the host has a single Metal queue that executes submissions in order, so commands before the fence are always done first and nothing needs waiting. A sync not fenced yet (fenced later by another thread) is not waited for here; logged once
-NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) { (void)q; static int once; if (!((const sync_t *)s)->fenced && !once++) LOG("[nvn] QueueWaitSync: the sync object has no fence yet, the host does not wait"); return 1; }
+NVN(nvnQueueWaitSync, NVNboolean, NVNqueue *q, const NVNsync *s) {
+    (void)q; static int once; const sync_t *o = (const sync_t *)s;
+    if (o->fenced == 2) { dm_gl_wait(o->fence, ~0ull); return 1; }   // made from a GL sync: GL renders on a queue of its own, so wait here until its command buffers up to that serial are done
+    if (!o->fenced && !once++) LOG("[nvn] QueueWaitSync: the sync object has no fence yet, the host does not wait");
+    return 1;
+}
 // ZCull data: the host does no ZCull, so there is nothing to save / restore
 NVN(nvnCommandBufferRestoreZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
 NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a, size_t n) { (void)c; (void)a; (void)n; }
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     const sync_t *o = (const sync_t *)s;
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+    if (o->fenced == 2) return dm_gl_wait(o->fence, 0) ? NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED : dm_gl_wait(o->fence, timeout) ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
     if (mtl_wait(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
     return mtl_wait(o->fence, timeout) ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
 }
+// NVN / GL interop (Naruto STORM 4): a GL sync made from an NVN sync waits for its NVN fence (glWaitSync); an NVN sync made from a fenced GL sync keeps
+// the GL serial (fenced 2), which nvnQueueWaitSync and nvnSyncWait wait for; the GL sync is the GL layer's own object (without the GL layer there is none, and the NVN sync is signalled)
+__attribute__((weak)) void *dm_gl_sync_nvn(uint64_t fence) { (void)fence; return NULL; }   // dm/gfx/gl/hle_gl.m
+NVN_NOPROTO(nvnSyncCreateGLSync, NVNboolean, const NVNsync *s, void **out) { const sync_t *o = (const sync_t *)s; *out = dm_gl_sync_nvn(o->fenced == 1 ? o->fence : 0); return *out != NULL; }
+NVN_NOPROTO(nvnSyncInitializeFromFencedGLSync, NVNboolean, NVNsync *s, NVNdevice *d, const void *gl) { (void)d; uint64_t v = dm_gl_sync_flush(gl); *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), v ? 2 : 1, v}; return 1; }
 NVN(nvnEventBuilderSetDefaults, void, NVNeventBuilder *b) { memset(b, 0, sizeof(ev_builder_t)); }
 NVN(nvnEventBuilderSetStorage, void, NVNeventBuilder *b, const NVNmemoryPool *p, int64_t off) { *(ev_builder_t *)b = (ev_builder_t){(const pool_t *)p, off}; }
 NVN(nvnEventInitialize, NVNboolean, NVNevent *e, const NVNeventBuilder *b) {
