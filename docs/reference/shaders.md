@@ -718,6 +718,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** reported by MacNativeGames (`1eff989`, `110e6c6`, Metal 3's `MTLBinaryArchive`, 25 GB overnight on Tears of the Kingdom); reproduced here with the Metal 4 serializer by a probe and on this repository's Mac, no single game identified.
 - **Check:** `t_pso_archive` checks that the first capture finds the folder and the flush removes it; a run of the test leaves no new folder (it left two before the fix, one from compaction and one from captures no flush wrote).
 
+### A pair whose base the Metal compiler cannot build
+
+- **Symptom:** the progress screen stays at `Preparing pipelines`, one pair short of the total (`20,739 of 20,740`), at every start; the NSP script's pipeline prebuild takes half an hour, and its log names one pair: `[RED] pipeline prebuild: the base of … failed: Compilation failed due to an interrupted connection: XPC_ERROR_CONNECTION_INTERRUPTED. This error occurred after multiple retries.`
+- **Cause:** a platform limit met by one shader: `MTLCompilerService` aborts out of memory compiling it (`llvm::report_bad_alloc_error` in the AGX back end; one crash report in `~/Library/Logs/DiagnosticReports` per attempt, about 7 minutes apart), and Metal gives up after four attempts. The prebuild wrote its stamp (`prebuilt.tsv`) only when no pair failed, so each start tried that pair again and the prepare step waited for it.
+- **Fix:** `nvn_mtl.m` (`pre_failed_note`, `g_pre_known_bad`): a pair whose base fails is noted in `pso_archive/prebuild_failed.tsv` under the chain version; later prebuilds leave the noted pairs to the draws (logged once), so the stamp is written. A list of another chain version is dropped. The compiler crash itself stays: a draw that needs that pipeline would wait the same half hour (open).
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md): the `alRenderMaterialUber` pixel shader `007d7e411ef14ebd` (`ps_shaderdata.bin#16064`), 31.5 MB of MSL (444,013 lines, 3,816 texture samples), the same size before and after the chain update, paired with vertex shader `3c3435a62e05975b`; no draw in the routes played so far needed it.
+- **Check:** `t_pso_bundle`: a pair whose pixel shader reads an input the vertex shader does not write fails, is noted, and the next prebuild leaves it to the draws and writes the stamp; another chain version's list is replaced.
+
 ### Pipeline keys omit unused colour state
 
 - **Symptom:** identical render pipelines compile repeatedly under different keys, lengthening startup prewarm and adding pipeline misses during play.

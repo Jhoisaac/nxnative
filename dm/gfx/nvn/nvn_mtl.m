@@ -5385,6 +5385,18 @@ void mtl_pso_line(char *o, size_t n) {
 // inputs but no pulling library, and integer-output or multisampled bases are left to the draws. An app that bundles these bases made offline (DM_PSO_BUNDLE, pso_bundle_covers)
 // builds none of them, only the pairs that archive left to the device (rest_pairs.tsv beside it: functions with constants)
 static _Atomic int g_pre_running; static _Atomic int g_pre_done, g_pre_built, g_pre_archived, g_pre_skipped, g_pre_failed;
+// Pairs whose base the Metal compiler could not build in an earlier prebuild of this chain version (pso_archive/prebuild_failed.tsv, its first line "chain\t<version>"): later
+// prebuilds leave them to the draws, so the stamp is written and the prepare step does not wait on them again. Before, a pair that failed kept the stamp from being written and was
+// tried again at every start: Super Mario Odyssey's alRenderMaterialUber pixel shader 007d7e411ef14ebd (31 MB of MSL) made MTLCompilerService abort out of memory
+// (llvm::report_bad_alloc_error) four times, about 7 minutes each, before Metal gave up (XPC_ERROR_CONNECTION_INTERRUPTED), and the progress screen stayed at its last pair
+static NSString *g_pre_failed_path; static NSSet<NSString *> *g_pre_known_bad; static pthread_mutex_t g_pre_failed_mu = PTHREAD_MUTEX_INITIALIZER;
+static void pre_failed_note(NSString *vk, NSString *fk) {   // appends a pair to prebuild_failed.tsv, the chain version first in a new file
+    if (!g_pre_failed_path) return;
+    pthread_mutex_lock(&g_pre_failed_mu);
+    FILE *f = fopen(g_pre_failed_path.fileSystemRepresentation, "a");
+    if (f) { fseek(f, 0, SEEK_END); if (ftell(f) == 0) fprintf(f, "chain\t%s\n", DMSH_CHAIN); fprintf(f, "%s\t%s\n", vk.UTF8String, fk.UTF8String); fclose(f); }
+    pthread_mutex_unlock(&g_pre_failed_mu);
+}
 static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   // as shader_load notes them (fn4_note): constants specialized with an empty set
     id<MTLFunction> f = [lib newFunctionWithName:name]; if (!f) return nil;
     MTL4LibraryFunctionDescriptor *ld = [MTL4LibraryFunctionDescriptor new]; ld.library = lib; ld.name = name;
@@ -5415,6 +5427,7 @@ static MTL4RenderPipelineDescriptor *pre_desc(NSString *vk, NSString *fk, int ze
 }
 static void pre_pair(NSString *vk, NSString *fk, int zero) {
     @autoreleasepool {
+        if ([g_pre_known_bad containsObject:[vk stringByAppendingFormat:@"\t%@", fk]]) { g_pre_skipped++; return; }   // see g_pre_known_bad
         MTL4RenderPipelineDescriptor *m = pre_desc(vk, fk, zero);
         if (!m) { g_pre_skipped++; return; }
         for (id<MTL4Archive> a in g_arch4p) if ([a newRenderPipelineStateWithDescriptor:m error:nil]) { g_pre_archived++; return; }
@@ -5422,7 +5435,7 @@ static void pre_pair(NSString *vk, NSString *fk, int zero) {
         NSError *e = nil;
         pthread_rwlock_rdlock(&g_arch_rw); id ps = ga_capture(m, nil, &e); pthread_rwlock_unlock(&g_arch_rw);
         if (ps) { g_pre_built++; atomic_fetch_add(&g_arch_new, 1); }
-        else { if (g_pre_failed++ < 4) MLOG("[RED] pipeline prebuild: the base of %s + %s failed: %s", vk.UTF8String, fk.UTF8String, e.localizedDescription.UTF8String); }
+        else { if (g_pre_failed++ < 4) MLOG("[RED] pipeline prebuild: the base of %s + %s failed: %s", vk.UTF8String, fk.UTF8String, e.localizedDescription.UTF8String); pre_failed_note(vk, fk); }
     }
 }
 // What a prebuild covers (prebuilt.tsv): the chain version, the depth mode, and the pair lists' length in bytes and SHA-256 (first 16 hex digits). dm/gfx/tools/pso_offline.py writes
@@ -5489,6 +5502,13 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     if (!g_ser4 || !g_arch_dir) { g_pre_running = 0; return -1; }
     NSString *stamp = [g_arch_dir stringByAppendingPathComponent:@"prebuilt.tsv"];
     if ([[NSString stringWithContentsOfFile:stamp encoding:NSUTF8StringEncoding error:nil] isEqualToString:want]) { g_pre_running = 0; return -1; }
+    g_pre_failed_path = [g_arch_dir stringByAppendingPathComponent:@"prebuild_failed.tsv"];
+    NSString *ft = [NSString stringWithContentsOfFile:g_pre_failed_path encoding:NSUTF8StringEncoding error:nil], *fhead = [NSString stringWithFormat:@"chain\t%s\n", DMSH_CHAIN];
+    NSMutableSet<NSString *> *bad = [NSMutableSet set];
+    if ([ft hasPrefix:fhead]) for (NSArray<NSString *> *p in pre_parse([ft substringFromIndex:fhead.length])) [bad addObject:[p[0] stringByAppendingFormat:@"\t%@", p[1]]];
+    else if (ft) [NSFileManager.defaultManager removeItemAtPath:g_pre_failed_path error:nil];   // another chain version's list: other shaders
+    g_pre_known_bad = bad;
+    if (bad.count) MLOG("pipeline prebuild: %lu pairs whose base the Metal compiler could not build in an earlier prebuild are left to the draws (%s)", (unsigned long)bad.count, g_pre_failed_path.UTF8String);
     int n = (int)pairs.count; uint64_t t0 = bp_now();
     MLOG("pipeline prebuild: %d shader pairs of %s%s%s, %d workers (%s)", n, pp.UTF8String, txt2 ? " and " : "", txt2 ? pp2.UTF8String : "", threads, wait ? "tool" : prepare_on() ? "prepare step, before the first frame" : "background");
     __block _Atomic int next = 0;

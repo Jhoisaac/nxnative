@@ -71,3 +71,4 @@ General host and tool changes first needed here; each applies to every game:
 - The silent first minute of sound.
 - development.md calls SDK 7.3.2 "the oldest so far"; Mario Kart 8 Deluxe (SDK 4.4.0) is older now.
 - `game.tsv` says values marked "Mario's" are not measured yet, but none is marked.
+- The `alRenderMaterialUber` pixel shader `007d7e411ef14ebd` (31.5 MB of MSL) makes Metal's compiler abort out of memory; the pipeline prebuild leaves its pair to the draws ([A pair whose base the Metal compiler cannot build](../../../docs/reference/shaders.md#a-pair-whose-base-the-metal-compiler-cannot-build)), and a draw that needs it would wait about half an hour. Why its translation is that large is not known yet.
