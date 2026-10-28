@@ -5596,9 +5596,10 @@ static dispatch_queue_t pp_bg_queue(void) {
     return q[atomic_fetch_add(&rr, 1) % (unsigned)n];
 }
 // Draws that waited for their pipeline on the submit thread, by why no stand-in served them: 0 hybrid pipelines off, 1 merged pass or readable-tile fragment, 2 diagnostic fragment,
-// 3 no pulling entry (layer-writing or transform feedback vertex shader, or no pulling library), 4 pulling base not made yet; count and time (prediction walks left out)
-static uint64_t g_pw_n[5], g_pw_ns[5];
-static const char *const g_pw_why[5] = {"hybrid off", "merged pass or readable tile", "diagnostic fragment", "no pulling entry", "pulling base not made yet"};
+// 3 no pulling entry (layer-writing or transform feedback vertex shader, or no pulling library), 4 pulling base not made yet, 5 joined its pulling base's build (hybrid_get with join:
+// the base was asked for already, by the prediction or an earlier draw, and the draw waits for the rest of that build, side by side with the others); count and time (prediction walks left out)
+static uint64_t g_pw_n[6], g_pw_ns[6];
+static const char *const g_pw_why[6] = {"hybrid off", "merged pass or readable tile", "diagnostic fragment", "no pulling entry", "pulling base not made yet", "joined a pulling base build"};
 // Takes a slot for k (with g_pp_mu held): a free one, else the oldest finished entry no draw took (its worker no longer touches it). spec: a speculative build, refused while
 // PSO_PEND_ACTIVE speculative builds run. Returns the slot, -1 when refused or k is in the table already
 static int pso_pend_slot(const pso_key *k, int spec, uint32_t *gen) {
@@ -5688,7 +5689,11 @@ static MTLRenderPipelineDescriptor *pso_desc_pull(const pso_key *k, NvShader *vs
     d.vertexFunction = pf; d.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
     return d;
 }
-static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *k, NvShader *vs, NvShader *fs) {
+// join (a draw, not the prediction): when the pulling base was asked for already (by the prediction of this submission or an earlier draw), wait for the rest of that build (pso_build
+// shares a base's build under way, or makes it when its queue has not started it) instead of building the draw's own pipeline from nothing: the prediction asks for the bases of every
+// predicted draw at once, so draws that miss one after another wait for builds running side by side, not for one compile each (Demon Slayer 2's chapter start: 7 compiles of 20-39 ms
+// in series on the submit thread, a 282 ms frame). *joined: it waited so
+static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get_(const pso_key *k, NvShader *vs, NvShader *fs, int join, int *joined) {
     __unsafe_unretained id<MTLRenderPipelineState> h = hm_get_id(&g_pso_hy, k);
     if (h) return h;
     MTLRenderPipelineDescriptor *d = vs->has_pull ? pso_desc_pull(k, vs, fs) : nil;
@@ -5699,11 +5704,13 @@ static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *
         os_unfair_lock_lock(&g_hy_lock); if (!g_hy_kick_set) g_hy_kick_set = [NSMutableSet set];
         int fresh = ![g_hy_kick_set containsObject:kd]; if (fresh) [g_hy_kick_set addObject:kd]; os_unfair_lock_unlock(&g_hy_lock);
         if (fresh) { g_hy_kicked++; dispatch_async(pp_bg_queue(), ^{ NSError *be = nil; (void)pso_build(d, &be); }); }
-        g_hy_none++; return nil;
+        if (!fresh && join) { e = nil; ps = pso_build(d, &e); if (ps && joined) *joined = 1; }
+        if (!ps) { if (join) g_hy_none++; return nil; }   // a draw's miss (the prediction's calls for the draws ahead are not misses)
     }
     g_hy_made++; hm_put_id(&g_pso_hy, k, ps);
     return ps;
 }
+static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *k, NvShader *vs, NvShader *fs) { return hybrid_get_(k, vs, fs, 0, NULL); }
 void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none) { *draws = g_hy_draws; *made = g_hy_made; *none = g_hy_none; }
 // The pipeline time line of the timing summary (hle_nvn.c), the difference since the last call
 void mtl_pso_line(char *o, size_t n) {
@@ -5714,9 +5721,9 @@ void mtl_pso_line(char *o, size_t n) {
              d[0] / 1e6, d[1] / 1e6, (unsigned long long)d[10], d[11] / 1e6, (unsigned long long)d[2], d[3] / 1e6, (unsigned long long)d[4], d[5] / 1e6, (unsigned long long)d[6], d[7] / 1e6,
              (unsigned long long)d[8], d[9] / 1e6, (unsigned long long)d[12], (unsigned long long)d[13], (unsigned long long)d[17], (unsigned long long)d[14], (unsigned long long)d[15], (unsigned long long)d[16], (unsigned long long)(v[14] - v[15] - v[16]));
     memcpy(p, v, sizeof p);
-    static uint64_t pn[5], pns[5]; size_t o2 = strlen(o);
+    static uint64_t pn[6], pns[6]; size_t o2 = strlen(o);
     o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; draws that waited:");
-    for (int i = 0; i < 5; i++) if (g_pw_n[i] > pn[i]) o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, " %s %llu / %.1f ms,", g_pw_why[i], (unsigned long long)(g_pw_n[i] - pn[i]), (g_pw_ns[i] - pns[i]) / 1e6);
+    for (int i = 0; i < 6; i++) if (g_pw_n[i] > pn[i]) o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, " %s %llu / %.1f ms,", g_pw_why[i], (unsigned long long)(g_pw_n[i] - pn[i]), (g_pw_ns[i] - pns[i]) / 1e6);
     memcpy(pn, g_pw_n, sizeof pn); memcpy(pns, g_pw_ns, sizeof pns);
 }
 
@@ -5980,9 +5987,15 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
             if (st == 0) ps = pso_build_ex(pso_desc(&k, vs, fs, nil, 0), &e, 0);   // its base made or archived: no compile
             if (!ps) {
                 // Demand first (main's order): the draw's own pipeline is queued before the prediction admits speculative builds; with a stand-in nothing waits for it
-                __unsafe_unretained id<MTLRenderPipelineState> h = hybrid_get(&k, vs, fs);
+                int joined = 0; __unsafe_unretained id<MTLRenderPipelineState> h = hybrid_get_(&k, vs, fs, 1, &joined);
                 if (h) {
-                    if (st == 0) pso_pend_demand(&k, vs, fs);
+                    if (joined) { uint64_t w = bp_now() - bt; g_pw_n[5]++; g_pw_ns[5] += w;
+                        static int lj = -1; if (lj < 0) { const char *ev = getenv("DM_PSO_WAITLOG"); lj = ev && !strcmp(ev, "1") ? 40 : 0; }
+                        if (lj > 0 && w > 20000000) { lj--; MLOG("pipeline wait %.1f ms (%s): vertex %s fragment %s, %u samples", w / 1e6, g_pw_why[5], vs->key, fs ? fs->key : "-", k.samples); } }
+                    // recorded now as well (record-on-use): a pipeline a cutscene draws only while its own build is under way is never taken by a later draw, and the next start's
+                    // prewarm would not know it (Demon Slayer 2's chapter start: 26 lines recorded for 30 draws that waited)
+                    if (st == 0) { pso_pend_demand(&k, vs, fs);
+                        pso_skey sk; char shex[sizeof sk * 2 + 1]; pso_skey_from(&k, vs, fs, 0, NULL, &sk); pso_skey_hex(&sk, shex); pso_user_record("R\t%s\n", shex); }
                     g_pso_pull = 1; g_hy_ns += bp_now() - bt;
                     if (g_pp_submit_mark != g_sub_serial) { g_pp_submit_mark = g_sub_serial; uint64_t t0 = bp_now(); pso_predict_rest(); g_bp_pso_ns += bp_now() - t0; }
                     return h;
@@ -7084,12 +7097,14 @@ static void pso_predict_rest_(void) {
     (void)df; (void)sf;
     // Main's demand-first budget: at most PSO_PREDICT_BUDGET new speculative builds. With hybrid pipelines a predicted draw whose pulling stand-in is ready (made here, from its base
     // made or archived: the work its draw would do) will not wait, and builds its own pipeline on demand (pso_pend_demand); the budget goes to the draws that would wait (a pair
-    // whose pulling base is not made yet)
+    // whose pulling base is not made yet). Every predicted draw asks for its stand-in, past the budget too: hybrid_get queues a missing pulling base on pp_bg_queue (serial, utility
+    // QoS, one queue per two performance cores), so the bases of the whole submission compile side by side and its draws wait for at most the longest of them. With the loop cut at
+    // the budget, Demon Slayer 2's chapter start compiled 7 of them one after another on the submit thread (20-39 ms each, a 282 ms frame)
     int admitted = 0, hy = hybrid_on();
-    for (int i = 0; i < na + nb && admitted < PSO_PREDICT_BUDGET; i++) {
+    for (int i = 0; i < na + nb && (hy || admitted < PSO_PREDICT_BUDGET); i++) {
         const pso_key *qk = i < na ? &qa[i].k : &qb[i - na].k; NvShader *qv = (__bridge NvShader *)(i < na ? qa[i].vs : qb[i - na].vs), *qf = (__bridge NvShader *)(i < na ? qa[i].fs : qb[i - na].fs);
         if (hy && !hm_get_id(&g_pso, qk) && hybrid_get(qk, qv, qf) != nil) continue;
-        admitted += pso_pend_kick(qk, qv, qf);
+        if (admitted < PSO_PREDICT_BUDGET) admitted += pso_pend_kick(qk, qv, qf);
     }
     memcpy(&S, &Ssave, sizeof S); R.sc = sc0; R.has_sc = has_sc0; args_dirty_all(); g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty; prog_resolve();
     static int logged; if (g_pp_kicked > (uint64_t)kicked0 && logged++ < 20) MLOG("parallel precompile: %d draws left in this submission, %d pipelines handed to the background", draws, (int)g_pp_kicked - kicked0);
