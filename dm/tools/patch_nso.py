@@ -554,28 +554,62 @@ def func_of(a):
 done = set(); windows = []; jumps = {}; tabjumps = {}; tailcalls = set(); retries = []
 def check_before_copy(insl, ctx, ld, idx):
     """The index copied from the checked register before the check, far back (DRAGON QUEST XI S main+0x2dd8cd0: mov w0,w18, then 41 instructions with two other jump tables on x0, then
-    cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18). Accepted when the cmp and its b.hi come right before the load and the mov is the last writer of the index and of the
-    checked register before them. Kingdom Battle's GLSLC (subsdk0+0x7340b8) copies w17 into w18 71 instructions before the load, across two switches that preserve both registers: an arbitrary
-    64-instruction limit missed that copy. Follow the writers to the function's start, stopping at calls that can clobber either register or at gaps in decoded code. Blocks in between that branch out
-    and back (main+0x2dd8ce0 → main+0x2dd8cb8) write neither. Tried only when every other form has failed (jump_offsets copy_first), so sites that rewrote before come out the same:
-    the one br x18 of its kind among the 25,508 x18 sites of that main. → the cmp, or None"""
-    k = ctx.index(ld)
-    if k < 2 or ctx[k - 1].mnemonic != 'b.hi' or ctx[k - 2].mnemonic != 'cmp': return None
-    m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', ctx[k - 2].op_str)
-    if not m: return None
-    src, kl = m.group(1), insl.index(ld)
+    cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18). Also the table base being built between the check and the load, and the index zero-extended after it
+    (Crash Bandicoot N. Sane Trilogy main+0x997b5c, Crash Team Racing Nitro-Fueled main+0x5ae924: cmp w8,#3; b.hi; and x18,x8,#0xffffffff; ldrsw x18,[x17,x18,lsl #2]; add x18,x18,x17; br x18).
+    The b.hi with its cmp is looked for within the 8 instructions before the load; an and that masks the checked source is a copy as well when the mask keeps every valid index.
+    The copy is searched backward over the control-flow graph of the function, not along the addresses: on every path that reaches the load there must be the copy, with no write to the
+    index or the checked register after it and no call that can clobber them (My Hero One's Justice 2 main+0x1c58cac: mov w0,w18 at +0x1c58be0, a jump table on x2 and a join, then
+    three guards cmp w18,#4 that reach ldrsw x18,[x11,x0,lsl #2] by b.ls, b.ls and the b.hi fall-through; the block right before the load ends in a b whose target writes x18 and never reaches
+    the load). Every branch that targets the load must be such a guard (b.ls after the same cmp), and none may enter between the check and the load. A block nothing branches to is taken as entered from every br xN of the function (not x18, whose tables are in tabjumps) (the jump table on x2 above); one with no such br fails the search. Tried only
+    when every other form has failed (jump_offsets copy_first), so sites that rewrote before come out the same. → the cmp, or None"""
+    k = ctx.index(ld); kl = insl.index(ld)
+    cmp_i = None; m = None
+    for bi in range(k - 1, max(0, k - 8) - 1, -1):   # the bounds check: b.hi right after its cmp; base setup may sit between it and the load
+        if ctx[bi].mnemonic == 'b.hi' and bi >= 1 and ctx[bi - 1].mnemonic == 'cmp':
+            m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', ctx[bi - 1].op_str)
+            if m: cmp_i = bi - 1; break
+    if cmp_i is None or m is None: return None
+    src, n = m.group(1), int(m.group(2), 0) + 1
+    full = (1 << (n - 1).bit_length()) - 1   # the bits every index below n can use
+    at = {p.address: q for q, p in enumerate(insl)}
+    into = {}   # target address → indices of the branches to it
+    for q, p in enumerate(insl):
+        if p.mnemonic in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'): into.setdefault(p.operands[-1].imm, []).append(q)
+    for site, tgts in tabjumps.items():
+        if site in at:
+            for t in tgts: into.setdefault(t, []).append(at[site])
+    indirect = []   # the br xN (not x18, whose tables are in tabjumps) that jump_offsets does not resolve: they may enter any block nothing else branches to
+    for q, p in enumerate(insl):
+        if p.mnemonic == 'br' and p.op_str not in ('x30', 'x18'):
+            tg = jump_offsets(insl, q, reg=p.op_str)
+            if tg:
+                for t in tg: into.setdefault(t, []).append(q)
+            else: indirect.append(q)
+    def preds(q):
+        res = list(into.get(insl[q].address, []))
+        if q and insl[q - 1].address + 4 == insl[q].address and insl[q - 1].mnemonic not in ('b', 'br', 'ret'): res.append(q - 1)
+        return res or indirect   # a block nothing branches to is entered by an indirect jump: any br xN of the function but x18 (a jump table on another register, which the rewriter does not resolve)
     def writes(p):   # capstone lists a compare's first operand as written (cmp w18,#4 at main+0x2dd8c30); it only sets the flags
         return set() if p.mnemonic in ('cmp', 'cmn', 'tst') else {'w' + p.reg_name(r)[1:] for r in p.regs_access()[1]}
-    for q in range(kl - 3, -1, -1):
-        p = insl[q]
-        if p.address + 4 != insl[q + 1].address: return None
-        if p.mnemonic in ('bl', 'blr') and any(int(r[1:]) <= 18 for r in idx | {src}): return None
-        mm = re.fullmatch(r'(w\d+), (w\d+)', p.op_str) if p.mnemonic == 'mov' else None
-        if mm and mm.group(1) in idx and mm.group(2) == src: break
-        if writes(p) & (idx | {src}): return None
-    else: return None
-    return ctx[k - 2]
-def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
+    for q in into.get(ld.address, []):   # a branch straight to the load is a guard of its own: cmp src,#N; b.ls
+        if insl[q].mnemonic != 'b.ls' or q < 1 or insl[q - 1].mnemonic != 'cmp' or insl[q - 1].op_str != ctx[cmp_i].op_str: return None
+    if any(into.get(insl[q].address) for q in range(insl.index(ctx[cmp_i]) + 1, kl)): return None   # a branch into the base setup would reach the load past the check
+    seen, todo = {kl}, [kl]
+    while todo:
+        z = todo.pop(); ps = preds(z)
+        if not ps: return None
+        for q in ps:
+            if q in seen: continue
+            seen.add(q); p = insl[q]
+            if p.mnemonic in ('bl', 'blr') and any(int(r[1:]) <= 18 for r in idx | {src}): return None
+            mm = re.fullmatch(r'(w\d+), (w\d+)', p.op_str) if p.mnemonic == 'mov' else None
+            if mm and mm.group(1) in idx and mm.group(2) == src: continue
+            ma = re.fullmatch(r'([wx]\d+), ([wx]\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'and' else None
+            if ma and ('w' + ma.group(1)[1:]) in idx and ('w' + ma.group(2)[1:]) == src and (int(ma.group(3), 0) & full) == full: continue   # x8 and w8 name one register here
+            if writes(p) & (idx | {src}): return None
+            todo.append(q)
+    return ctx[cmp_i]
+def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False, reg='x18'):
     """The br x18 is preceded by the offset-table form (Engage main+0x12eec94): cmp w18,#N; b.hi; ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB.
     The index may be another register, and the bounds check may be on a register copied into it: Link's Awakening's GLSLC (subsdk0+0x1be6e8) has
     sub w0,w18,#0xd1; cmp w0,#0x31; b.hi; ldrsw x18,[x17,x0,lsl #2], its movie module (subsdk1+0xae9a4) cmp w21,#7; b.hi; ...; mov w18,w21; ldrsw x18,[x4,x18,lsl #2].
@@ -586,7 +620,7 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     and +0x6db70c load bases set 441 and 549 instructions before, x24 in the function's first block and x3 after it, which the loop around their dispatches keeps. A function-wide search
     for the one adrp + add pair that fits (table_cands, as jump_adr_offsets does) finds two for x3 there, the other a table of its own further on. Returns all targets, or None if not recognized"""
     ctx = insl[max(0, j - 16):j]
-    add = next((p for p in reversed(ctx) if p.mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', p.op_str)), None)
+    add = next((p for p in reversed(ctx) if p.mnemonic == 'add' and re.fullmatch(rf'{reg}, x\d+, x\d+', p.op_str)), None)
     if not add: return None
     _, t, rb = add.op_str.split(', ')   # t = the loaded entry, rb = the table base
     ld = next((p for p in reversed(ctx) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', p.op_str)), None)

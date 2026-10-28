@@ -1211,7 +1211,7 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
         jd, rd, log = work / f'tmp/ue_job_{v}', work / 'tmp/ue_run', logs / f'ue_decode_{v}.log'
         rmtree(jd); rmtree(rd)
         for s in ('save', 'temp'): (rd / s).mkdir(parents=True)
-        def start():   # the game's Oodle, for IoStore shader libraries and inline shaders (uepak.job calls it only for those)
+        def start(v=v):   # the game's Oodle, for IoStore shader libraries and inline shaders (uepak.job calls it only for those); v bound now, not at the call
             nonlocal host
             if not host:
                 PROG.set(step='building the Mac host')
