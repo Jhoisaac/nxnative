@@ -33,8 +33,9 @@ enum { O_FREE, O_THREAD, O_EVENT_R, O_EVENT_W };
 // An entry lives as long as that handle: CloseHandle on it removes the entry (se_unbind), so a SystemEvent destroyed and created again at the same address gets a new kernel event.
 // Entries used to stay forever: the second bind returned early, the new event was never created and signals went to the closed handle (or to whatever event reused its number).
 // Lock order: G, then g_se_lock (nothing takes G while holding g_se_lock)
-static struct { void *ev; uint32_t wh; } g_se[512];
+static struct { void *ev; uint32_t wh; uint64_t id; } g_se[512];
 static int g_nse;
+static uint64_t g_next_se_id = 1;   // g_se_lock: binding identity survives neither address nor handle reuse
 static pthread_mutex_t g_se_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t se_find(void *ev) {   // caller holds g_se_lock
     for (int i = 0; i < g_nse; i++) if (g_se[i].ev == ev) return g_se[i].wh;
@@ -55,8 +56,11 @@ typedef struct thr {
     // Current wait: kind 0=none 1=lock 2=condition 3=address 4=synchronization object
     int wkind, woke; uint64_t waddr, wkey; uint32_t wtag; int64_t wres;
     _Atomic int sleeping;      // inside SleepThread's timed sleep (not runnable; used by dm_yield_to_core_peers)
-    int yield_pending;         // this SVC woke a higher-priority thread pinned to this core: let it run before the SVC returns (svc_thread)
+    int yield_pending;         // this caller woke a higher-priority thread pinned to its core: hand off before returning to guest code
+    _Atomic uint64_t hand_epoch;   // this thread's current handoff: threads it makes runnable belong to it until its next thread SVC returns (svc_thread)
+    struct { struct thr *by; uint64_t epoch; } hand[4]; int nhand;   // the handoffs this thread was made runnable for (its waker's, then those the waker belonged to), until it blocks (note_runnable / hand_leave)
     _Atomic int *host_work;    // points at the thread's dm_host_work (registered when the thread starts)
+    int native_wait;          // nesting depth of a blocking native HLE wait (G held)
     int host_owned;            // a guest thread the host created itself (dm_guest_thread_spawn): it waits in host code and is not one of the game's threads
     uint64_t wseq;             // Sequence number of wait registration: at equal priority first come, first woken (same order as the Horizon kernel's KThread wait tree)
     struct thr *next;          // Wait chain
@@ -68,7 +72,7 @@ typedef struct thr {
     uint64_t nspin, nspin_seen, spin_site; const char *spin_mod;   // Spin wait passes (dm_spin_wait; those that yield count in nyield too) and where the last one was
     uint64_t srun_svc, srun_t0, spin_ret;     // Current spin wait: nsvc at its passes, when it began, when the last pass returned
     uint64_t cpu_seen_us;                     // CPU time (µs) at the last power report (dm_thread_cpu)
-    uint64_t yrun_svc, yrun_t0, yrun_sig;     // Current run of yields: nsvc of the last yield, when the run began, and the caller's x19–x28 at the last yield (a run lasts while no other SVC comes between two yields and those registers stay the same, thr_yield)
+    uint64_t yrun_svc, yrun_t0, yrun_sig, yrun_sig2;   // Current run of yields: nsvc of the last yield, when the run began, and the caller's x19–x28 at the last two yields (a run lasts while no other SVC comes between two yields and those registers match one of the last two, thr_yield)
     mach_port_t mport;         // Host thread port (to get CPU time)
     _Atomic int qos_pending;   // SetThreadPriority from another thread changed prio: the thread applies the new class at its next SVC (only a thread can set its own QoS)
     uint32_t qos;
@@ -85,7 +89,8 @@ typedef struct thr {
 } thr_t;
 static thr_t *g_all;
 extern __thread _Atomic int dm_host_work;   // declared in hle.h too; defined in hle_nvn.c
-static _Atomic uint64_t g_preempt_n, g_preempt_ns, g_preempt_cap;   // same-core preemption yields: count, total wait, cap hits (svc_thread)
+static _Atomic uint64_t g_preempt_n, g_preempt_ns;   // same-core handoffs: count and total wait (svc_thread)
+static int g_core_preempt;   // also check already-runnable peers after every thread SVC (profile / DM_PREEMPT)
 
 static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
 #define MAX_H 4096
@@ -114,36 +119,63 @@ static thr_t *cur(void) {
     if (!t) die("thread SVC called from a non-guest thread");
     return t;
 }
-// Let higher-priority threads of the same core run first: Horizon schedules per core, and when a signal from one thread wakes a higher-priority thread pinned to the same core, that thread preempts at once and runs until it blocks again before the signalling thread continues.
-// Some games rely on this as synchronization: in Metroid Dread's movie player the main thread (priority 44, core 0) posts "tear down the decoder" to the dispatcher and worker threads (priority 30, core 0 only), then frees the object without waiting
-// and builds the next one in the same memory; on the host the threads truly run in parallel, the dispatcher still had the old holders linked and the worker still had the old object queued, so SignalEvent hit a null MultiWait and the worker read a freed object.
-// svc_thread calls it after an SVC that woke such a thread: it waits until every started, unexited, not host-created thread allowed only on this core with a higher priority is waiting or sleeping, for at most max_us; returns −1 on timeout
+// Horizon's per-core priority ordering: a woken higher-priority thread pinned to
+// the caller's core runs until it blocks before the signalling thread continues.
+// See docs/reference/threads.md, "Same-core wake handoffs", for the movie lifetime failure this prevents.
+// svc_thread calls it after waking such a thread. Wait for guest blocking, not a host dispatch snapshot or a wall-clock deadline: neither establishes that the work has finished.
 void dm_thread_mark_host(void) { thr_t *t = pthread_getspecific(g_keythr); if (t) t->host_owned = 1; }
-// Whether a thread is really running: besides guest waits / timed sleeps it may be blocked in host code (an HLE call waiting on a host condition variable, the GPU, a file), which has no guest wait kind; only the kernel's thread state tells
-static int thr_running(const thr_t *t) {
-    if (t->wkind || t->sleeping || !t->mport || (t->host_work && *t->host_work)) return 0;
-    thread_basic_info_data_t bi; mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT;
-    if (thread_info(t->mport, THREAD_BASIC_INFO, (thread_info_t)&bi, &n) != KERN_SUCCESS) return 0;
-    return bi.run_state == TH_STATE_RUNNING;
+// Holding G. wake() clears wkind before the pthread resumes; it must already count as runnable in that window, even if Mach still reports WAITING / STOPPED.
+// Explicit host GPU work and contended native codec locks do not occupy a guest core. Ordinary host dispatch delays and HLE calls do, until a guest wait / sleep / exit says otherwise.
+static int thr_runnable(const thr_t *t) {
+    return !t->wkind && !t->sleeping && !t->native_wait && !t->pause_req && !(t->host_work && *t->host_work);
 }
-int dm_yield_to_core_peers(unsigned max_us) {
+// Holding G. Whether t was made runnable for self's current handoff (by self, or by a thread that was) and has not blocked since
+static int thr_in_handoff(const thr_t *t, const thr_t *self) {
+    for (int i = 0; i < t->nhand; i++) if (t->hand[i].by == self && t->hand[i].epoch == self->hand_epoch) return 1;
+    return 0;
+}
+// Holding G. t blocked (a guest wait, a timed sleep, YieldToAnyThread): it gave its core back, so it no longer holds the threads whose handoff made it runnable
+static void hand_leave(thr_t *t) { t->nhand = 0; }
+// A native HLE condition wait is a guest blocking boundary, like a kernel wait.
+// Called with the HLE's condition mutex held: the waiter cannot miss a signal
+// between publishing its blocked state and pthread_cond_wait releasing that
+// mutex. On return it is runnable before it goes back to guest code.
+void dm_thread_native_wait(int entering) {
+    thr_t *t = pthread_getspecific(g_keythr);
+    if (!t) return;
+    pthread_mutex_lock(&G);
+    if (entering) { t->native_wait++; hand_leave(t); }
+    else { if (!t->native_wait) die("unbalanced native HLE wait"); t->native_wait--; }
+    pthread_mutex_unlock(&G);
+}
+
+// The peers a handoff waits for are the ones it made runnable, not every runnable higher-priority thread of the core. The host runs a
+// lower-priority thread beside busy higher-priority threads of its core all the time (it has no per-core scheduler; core_preempt aside),
+// and waiting for those threads at a wake had no bound: Tears of the Kingdom's BootupBackgroundWorkThread (priority 58) waited at each
+// wake for its core's busy loaders and workers (issue #247: black screen, no texture loaded), and Donkey Kong Country: Tropical Freeze's
+// priority-58 job thread for threads that poll with short sleeps (issue #259). all = 1 (core_preempt): every runnable higher-priority peer
+int dm_yield_to_core_peers(int all) {
     thr_t *self = pthread_getspecific(g_keythr); if (!self) return 0;
-    uint64_t bit = 1ull << (self->core & 63), t0 = now_ns(); int waited = 0;
+    uint64_t bit = 1ull << (self->core & 63); int waited = 0;
     for (;;) {
-        thr_t *busy = NULL;
+        int busy = 0;
         pthread_mutex_lock(&G);
         for (thr_t *t = g_all; t && !busy; t = t->all)
-            if (t != self && t->started && !t->exited && !t->host_owned && t->mask == bit && t->prio < self->prio && thr_running(t)) busy = t;
-        uint32_t bh = busy ? busy->handle : 0; int bp = busy ? busy->prio : 0; uint64_t blr = busy ? busy->last_lr : 0; int bsvc = busy ? busy->last_svc : 0;
+            if (t != self && t->started && !t->exited && !t->host_owned && t->mask == bit && t->prio < self->prio && thr_runnable(t) && (all || thr_in_handoff(t, self))) busy = 1;
         pthread_mutex_unlock(&G);
         if (!busy) return waited;
-        if (now_ns() - t0 > (uint64_t)max_us * 1000) {
-            static _Atomic int nlog; if (nlog++ < 8) { module_t *m = module_of((void *)blr);   // the first few cap hits: who waits, who keeps running
-                LOG("same-core preemption yield hit its cap: thread %#x (priority %d core %d) waits for %#x (priority %d, last svc %#x lr=%s+%#llx)", self->handle, self->prio, self->core, bh, bp, bsvc, m ? m->name : "?", (unsigned long long)(m ? blr - (uint64_t)m->base : blr)); }
-            return -1;
-        }
         { struct timespec ts = {0, 50000}; nanosleep(&ts, 0); } waited = 1;
     }
+}
+// Take a host lock that an HLE call holds while it runs guest code. A guest thread waiting for it is in a native HLE wait (dm_thread_native_wait), blocked as it would be
+// on the guest-visible lock the SDK's own code uses there, so it does not hold a same-core handoff: Kirby and the Forgotten Land's guide movies froze the game when the movie decoder's decode lock was held across the
+// "input available" SignalEvent, the signal woke the priority-44 movie threads of core 0, and the signaller (a priority-46 job worker) waited for its woken input thread,
+// which was itself waiting for that lock (hle_movie.c md_pump)
+void dm_host_lock(pthread_mutex_t *m) {
+    if (!pthread_mutex_trylock(m)) return;
+    dm_thread_native_wait(1);
+    pthread_mutex_lock(m);
+    dm_thread_native_wait(0);
 }
 
 // ---------- Wait primitives (called holding G) ----------
@@ -161,15 +193,28 @@ static thr_t *pick(int kind, uint64_t a) {
     }
     return b;
 }
+// Holding G. Starting a thread makes it runnable just as waking a waiter does;
+// neither operation promises that an equal-priority or other-core peer has run.
+// t joins the waker's current handoff and those the waker is part of: Metroid Dread's main thread (priority 44) waits for its movie dispatcher (30),
+// and for the worker (30) the dispatcher wakes in turn, though the dispatcher's wake of an equal-priority thread is no handoff of its own
+static void note_runnable(thr_t *t) {
+    thr_t *self = pthread_getspecific(g_keythr);
+    t->nhand = 0;
+    if (!self || self == t || t->host_owned) return;
+    t->hand[t->nhand].by = self; t->hand[t->nhand++].epoch = self->hand_epoch;
+    for (int i = 0; i < self->nhand && t->nhand < 4; i++)
+        if (self->hand[i].by != t && self->hand[i].by->hand_epoch == self->hand[i].epoch) t->hand[t->nhand++] = self->hand[i];   // only handoffs still in progress
+    if (t->prio < self->prio && t->mask == 1ull << (self->core & 63)) self->yield_pending = 1;
+}
 static void wake(thr_t *t, int64_t res) {
     wait_unlink(t); t->wkind = 0; t->woke = 1; t->wres = res; pthread_cond_signal(&t->cv);
-    thr_t *self = pthread_getspecific(g_keythr);   // the woken thread is pinned to this core with a higher priority: on Horizon it preempts at once (see dm_yield_to_core_peers)
-    if (self && self != t && !t->host_owned && t->prio < self->prio && t->mask == 1ull << (self->core & 63)) self->yield_pending = 1;
+    note_runnable(t);
 }
 // Suspend until woken or timed out (ns<0 infinite, 0 immediate timeout); returns wres or R_TIMEOUT
 static int64_t block(thr_t *t, int kind, int64_t ns) {
     t->wkind = kind; t->woke = 0; t->next = g_wait; g_wait = t; t->wseq = ++g_wseq;
     if (ns == 0) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
+    hand_leave(t);
     struct timespec dl;
     int det_wait = ns > 0 && dm_detclock_enabled();
     uint64_t guest_deadline = det_wait ? guest_ns() + (uint64_t)ns : 0;
@@ -255,6 +300,8 @@ static void *thread_main(void *p) {
 }
 static void thr_free(thr_t *t) {   // Holding G; unlink from the all-threads chain and free
     for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == t) { *p = t->all; break; }
+    for (thr_t *u = g_all; u; u = u->all)   // no handoff entry may point at the freed object (note_runnable reads the waker's epoch)
+        for (int i = 0; i < u->nhand; ) if (u->hand[i].by == t) u->hand[i] = u->hand[--u->nhand]; else i++;
     pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv); free(t);
 }
 static void wake_sync_waiters(const void *obj);
@@ -418,6 +465,7 @@ static void hitch_init(void) {
 uint32_t svc_thread_main_init(void) {
     pthread_key_create(&g_keythr, NULL);
     qos_map_init();
+    { const char *e = getenv("DM_PREEMPT"); g_core_preempt = e ? atoi(e) != 0 : DM_GAME_CORE_PREEMPT; }
     pause_install();
     hitch_init();
     thr_t *t = calloc(1, sizeof *t);
@@ -566,7 +614,7 @@ void svc_thread_dump(void) {
     static const char *kinds[] = {"running/not waiting", "mutex", "condvar", "address", "sync object"};
     int nh = 0; for (int i = 1; i < MAX_H; i++) nh += g_h[i].type != O_FREE;
     fprintf(stderr, "[dm] handle table use %d / %d, threads created so far %llu\n", nh, MAX_H, g_next_id - 0x51);
-    fprintf(stderr, "[dm] same-core preemption yields %llu, total %.1f ms, hit the cap %llu times\n", (unsigned long long)g_preempt_n, g_preempt_ns / 1e6, (unsigned long long)g_preempt_cap);
+    fprintf(stderr, "[dm] same-core handoffs %llu, total %.1f ms\n", (unsigned long long)g_preempt_n, g_preempt_ns / 1e6);
     for (thr_t *t = g_all; t; t = t->all) {
         module_t *m = module_of((void *)t->last_lr);
         // Thread name: SDK ThreadType+0x1a0 is the name pointer (ThreadManager::SetInitialThreadNameUnsafe 0x34a2a4); x2 of CreateThread = ThreadType*
@@ -589,6 +637,21 @@ void svc_thread_dump(void) {
                 m ? m->name : "?", m ? t->last_lr - (uint64_t)m->base : t->last_lr);
         if (have_raw) { char hx[200]; int q = 0; for (int i = 0; i < 64; i += 4) q += snprintf(hx + q, sizeof hx - q, "%08x ", *(uint32_t *)(raw + i));
                         fprintf(stderr, "[dm]   %#x waited-for object, 64 bytes from %#llx: %s\n", t->handle, t->waddr & ~0xfull, hx); }
+        // A thread in an SVC: the guest code that called it, from its stack. Engines built without frame pointers (Batman: Arkham Knight's Unreal Engine 3) leave the frame-pointer backtrace
+        // at the SVC wrapper, so the words above the gate's register frame that point into a module are listed, nearest first, with x19-x28. regs + 800 holds the x29 / x30 the gate block
+        // pushed (x30 = the return address into the wrapper's caller, which the backtrace skips: the wrappers are leaf functions), the guest stack at the SVC follows at regs + 816.
+        // Read page by page up to the first unreadable one: a thread waiting near its stack top (a shallow worker) has PROT_NONE stack region above it, and one read would fail whole
+        uint64_t *sr = atomic_load(&t->svc_regs);
+        if (sr && t->wkind) { uint64_t stk[160]; size_t got = 0; vm_address_t sa = (vm_address_t)((uint8_t *)sr + 800);
+            while (got < sizeof stk) { vm_size_t n = sizeof stk - got, g4 = 0, room = vm_page_size - ((sa + got) & (vm_page_size - 1)); if (n > room) n = room;
+                if (vm_read_overwrite(mach_task_self(), sa + got, n, (vm_address_t)((uint8_t *)stk + got), &g4) || g4 != n) break;
+                got += n; }
+            if (got >= 16 && atomic_load(&t->svc_regs) == sr) {   // still in that SVC: the words are its stack, not a later frame's
+                char sl[1100]; int q = snprintf(sl, sizeof sl, "[dm]   %#x guest stack:", t->handle), nfr = 0;
+                for (int i = 0; i < (int)(got / 8) && nfr < 16 && q < (int)sizeof sl - 40; i++) { module_t *m2 = module_of((void *)stk[i]);
+                    if (m2 && stk[i] - (uint64_t)m2->base < m2->text_end) { q += snprintf(sl + q, sizeof sl - q, " [%d]%s+%#llx", i * 8, m2->name, stk[i] - (uint64_t)m2->base); nfr++; } }
+                q += snprintf(sl + q, sizeof sl - q, " | x19=%#llx x20=%#llx x21=%#llx x22=%#llx x23=%#llx x24=%#llx x25=%#llx x26=%#llx x27=%#llx x28=%#llx", sr[19], sr[20], sr[21], sr[22], sr[23], sr[24], sr[25], sr[26], sr[27], sr[28]);
+                fprintf(stderr, "%s\n", sl); } }
         thr_bt(t);
     }
     // Threads created by the host itself (graphics present, audio, movie decoding, etc.): not in the guest thread table, enumerated as mach threads, the first 12 frames symbolized with dladdr
@@ -620,10 +683,9 @@ void svc_thread_dump(void) {
     }
 }
 
-// An approximation of same-core preemption: when an SVC woke a higher-priority thread pinned to this core, wait before the SVC returns until those threads (and every other higher-priority thread of this core) block, for at most 5 ms.
-// Metroid Dread's movie player relies on it: the main thread posts "unlink the holders" to the dispatcher thread (priority 30, core 0 only) and leaves messages for the worker thread, then frees the object and builds a new one in its place;
-// on hardware the dispatcher / worker preempt the main thread as soon as it signals and finish first, while on the host, without the wait, old holders got re-initialized and the worker read freed objects (crashes in SignalEvent on a null MultiWait and at main+0x225338).
-// On per the game profile's core_preempt (off by default: Mario's loader threads would wait for busy high-priority decompression threads, pushing its first frame from 0.6 s to 2.9 s); DM_PREEMPT=0 / 1 overrides the profile. Counts are in the thread state dump
+// Same-core wake handoffs apply to every game. core_preempt additionally checks
+// already-runnable peers after every thread SVC; DM_PREEMPT overrides that option.
+// These are cooperative boundaries, not an asynchronous guest-core scheduler.
 static int svc_thread_impl(int num, uint64_t *regs);
 // Yield back-off: on the Switch a yield with nothing else runnable costs nothing, but a guest loop that polls the tick and yields (Three Houses' frame limiter main+0x5be430 waited out each 33 ms frame this way:
 // 228,105 yields per frame on an iPhone, a P-core at full clock; a per-build cut in its patches.py now makes it sleep) becomes a host busy spin. A run of yields with no other SVC between them (and no progress, thr_yield) is let through as plain sched_yield for its first 2 ms;
@@ -657,13 +719,15 @@ static void yield_for(thr_t *me, uint64_t run_ns) {
 // with the back-off each yield slept 250 µs, about 2,600 cells a second, and the screen stayed black with the loading icon for 77 s after the opening movie (now about 10 s).
 // Breath of the Wild's PlacementMgr and RadarMgr yield once per item of their batches too (a list pointer and a count move; RadarMgr's batch is 94,263 items, which the back-off
 // stretched to about 30 s): standing outdoors on the Mac, CPU energy 0.35–0.74 → 0.21–0.34 W at 60 fps, CPU 76–83% → 96–106% of a core, frame interval p99 19 → 20–21 ms.
-// With sched_yield on each such yield (about 200,000 a second) it was 108–121% of a core and 0.38–0.70 W
+// With sched_yield on each such yield (about 200,000 a second) it was 108–121% of a core and 0.38–0.70 W.
+// A loop that waits at two yields comes back to the registers of the yield before last: Hades' NetworkPollThread (main+0x27aaa0) yields between its passes (w23 = 0) and once
+// in each pass's wait for the nifm request (w23 = 2,000, its retry count), and spun a host core as one that moved on at every yield
 static void thr_yield(thr_t *me, const uint64_t *regs) {
     if (!me) { sched_yield(); return; }
     uint64_t y0 = now_ns(), sig = 0xcbf29ce484222325ull;
     for (int i = 19; i <= 28; i++) sig = (sig ^ regs[i]) * 0x100000001b3ull;
-    int moved = me->yrun_svc + 1 == me->nsvc && me->yrun_sig != sig;   // the loop moved on since its last yield
-    me->nyield++; if (me->yrun_svc + 1 != me->nsvc || moved) me->yrun_t0 = y0; me->yrun_svc = me->nsvc; me->yrun_sig = sig;
+    int moved = me->yrun_svc + 1 == me->nsvc && me->yrun_sig != sig && me->yrun_sig2 != sig;   // the loop moved on since its last two yields
+    me->nyield++; if (me->yrun_svc + 1 != me->nsvc || moved) me->yrun_t0 = y0; me->yrun_svc = me->nsvc; me->yrun_sig2 = me->yrun_sig; me->yrun_sig = sig;
     if (!moved) yield_for(me, y0 - me->yrun_t0);
     if (me->handle == 0x1001) { g_main_yield_ns += now_ns() - y0; g_main_yield_n++; }
 }
@@ -754,14 +818,14 @@ void dm_guest_sleep_ns(int64_t ns) {
 int svc_thread(int num, uint64_t *regs) {
     int r = svc_thread_impl(num, regs);
     thr_t *me = pthread_getspecific(g_keythr);
-    static int on = -1; if (on < 0) { const char *e = getenv("DM_PREEMPT"); on = e ? atoi(e) != 0 : DM_GAME_CORE_PREEMPT; }
-    // Not only "whom did this SVC wake": when a higher-priority thread of the same core is already running (busy, not waiting, at the time of the signal), on hardware the calling thread does not get the CPU at all.
-    // Metroid Dread: with the dispatcher thread busy, the main thread's "unlink the holders" request woke nobody, the object was freed right away, and the dispatcher later walked the freed holders in WaitAny and crashed
-    if (me && on) {
-        uint64_t t0 = now_ns(); int w = dm_yield_to_core_peers(5000);
-        if (w) { if (w < 0) g_preempt_cap++; g_preempt_n++; g_preempt_ns += now_ns() - t0; }
+    // The default path hands off only after a wake. The optional broader mode
+    // also checks peers that were already runnable, without serializing every
+    // game's SVCs behind unrelated busy workers by default.
+    if (me && (g_core_preempt || me->yield_pending)) {
+        uint64_t t0 = now_ns(); int w = dm_yield_to_core_peers(g_core_preempt);
+        if (w) { g_preempt_n++; g_preempt_ns += now_ns() - t0; }
     }
-    if (me) me->yield_pending = 0;
+    if (me) { me->yield_pending = 0; me->hand_epoch++; }   // the handoff is complete: threads this one made runnable no longer hold it
     return r;
 }
 static int svc_thread_impl(int num, uint64_t *regs) {
@@ -787,13 +851,16 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     case 0x09: {  // StartThread(w0)
         pthread_mutex_lock(&G);
         thr_t *t = h_get((uint32_t)regs[0], O_THREAD);
-        if (t) { t->started = 1; pthread_cond_signal(&t->cv); }
+        if (t) { t->started = 1; pthread_cond_signal(&t->cv); note_runnable(t); }
         pthread_mutex_unlock(&G);
         regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
     }
     case 0x0A: thread_exit(cur()); return 1;
     case 0x0B: {  // SleepThread(x0 ns); 0/-1/-2 = the various kinds of yield
         int64_t ns = (int64_t)regs[0];
+        // A sleep, and YieldToAnyThread (-2), which takes the thread off its core so that lower-priority threads run there, end its part in a handoff;
+        // the other yields (0, -1) pass the core only to threads of its own priority or higher
+        if (ns > 0 || ns == -2) { thr_t *me = pthread_getspecific(g_keythr); if (me && me->nhand) { pthread_mutex_lock(&G); hand_leave(me); pthread_mutex_unlock(&G); } }
         if ((ns > 0 && dm_detclock_enabled()) || ns >= 20000) dm_guest_sleep_ns(ns);
         // Yield (0 / -1 / -2), and sleeps shorter than 20 µs, which sleep_precise would return from at once: Super Mario Galaxy's Hagi polls with SleepThread(100 ns) (main+0x517c),
         // which kept a core at 100% (1.4 billion calls in 200 s); as yields they get the back-off below.
@@ -1017,10 +1084,30 @@ void hle_bind_system_event(void *ev, int autoclear) {      // Must be called on 
     wh = getw(ev);
     pthread_mutex_lock(&g_se_lock);
     if (g_nse >= (int)(sizeof g_se / sizeof g_se[0])) die("SystemEvent binding table full");
-    g_se[g_nse].ev = ev; g_se[g_nse++].wh = wh;
+    g_se[g_nse].ev = ev; g_se[g_nse].wh = wh; g_se[g_nse++].id = g_next_se_id++;
     pthread_mutex_unlock(&g_se_lock);
 }
-void hle_signal_system_event(void *ev) {   // An unbound one is bound on the spot as manual-clear (can only happen on a guest thread)
+uint64_t hle_system_event_binding(void *ev) {
+    uint64_t id = 0;
+    pthread_mutex_lock(&g_se_lock);
+    for (int i = 0; i < g_nse; i++) if (g_se[i].ev == ev) { id = g_se[i].id; break; }
+    pthread_mutex_unlock(&g_se_lock);
+    return id;
+}
+int hle_signal_system_event_binding(uint64_t binding) {
+    // Match the lifetime and signal under G, just as CloseHandle removes it under
+    // G: a stale producer cannot signal a new event that reuses either number.
+    pthread_mutex_lock(&G);
+    uint32_t wh = 0;
+    pthread_mutex_lock(&g_se_lock);
+    for (int i = 0; i < g_nse; i++) if (g_se[i].id == binding) { wh = g_se[i].wh; break; }
+    pthread_mutex_unlock(&g_se_lock);
+    event_t *e = wh ? h_get(wh, O_EVENT_W) : NULL;
+    if (e) { e->signaled = 1; wake_sync_waiters(e); }
+    pthread_mutex_unlock(&G);
+    return e != NULL;
+}
+void hle_signal_system_event(void *ev) {   // An unbound one is bound on the spot as manual-clear (only on a guest thread: off one it is skipped)
     // Lookup and signal under one hold of G: CloseHandle (which unbinds) also runs under G, so the handle cannot be closed and its number reused in between
     for (int bound = 0; ; bound = 1) {
         pthread_mutex_lock(&G);
@@ -1034,6 +1121,9 @@ void hle_signal_system_event(void *ev) {   // An unbound one is bound on the spo
         }
         pthread_mutex_unlock(&G);
         if (bound) die("SystemEvent %p still not found after binding", ev);
+        // A host thread (audio, vsync) signalling an event the game has destroyed: binding needs SDK code, which only a guest thread can run, and the event is gone anyway
+        // (MacNativeGames dab728a: skipped, not fatal)
+        if (!pthread_getspecific(g_keythr)) { static _Atomic int once; if (!atomic_exchange(&once, 1)) LOG("[RED] SystemEvent %p signalled off a guest thread after the game destroyed it: skipped", ev); return; }
         hle_bind_system_event(ev, 0);   // guest code (SVCs take G): outside the lock
     }
 }

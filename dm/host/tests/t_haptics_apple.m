@@ -26,21 +26,37 @@
 @property TestPlayer *testPlayer;
 @property int starts, stops;
 @property BOOL fail;
-@property BOOL failPattern, failHelper, failPlayer, failSend, handlersAtStart, resetDuringStart;
+@property BOOL failPattern, failPlayer, failSend, handlersAtStart, resetDuringStart, noAdvanced, broken;
+@property int plainPlayers;
+@property(readonly) NSTimeInterval currentTime;
 @property(copy) void (^startingReset)(void);
 @end
 @implementation TestEngine
+- (NSTimeInterval)currentTime { return now(); }   // an engine's clock runs like the host's
 - (BOOL)startAndReturnError:(NSError **)e {
     self.starts++; self.handlersAtStart = self.resetHandler && self.stoppedHandler;
     self.startingReset = self.resetHandler;
     if (self.resetDuringStart && self.resetHandler) self.resetHandler();
-    if (self.fail && e) *e = [NSError errorWithDomain:CoreHapticsErrorDomain code:CHHapticErrorCodeServerInitFailed userInfo:nil];
-    return !self.fail;
+    if ((self.fail || self.broken) && e) *e = [NSError errorWithDomain:CoreHapticsErrorDomain code:CHHapticErrorCodeServerInitFailed userInfo:nil];
+    return !self.fail && !self.broken;
 }
 - (void)stopWithCompletionHandler:(CHHapticCompletionHandler)handler { self.stops++; if (handler) handler(nil); }
 - (id<CHHapticAdvancedPatternPlayer>)createAdvancedPlayerWithPattern:(CHHapticPattern *)p error:(NSError **)e {
-    (void)p; if (self.failPattern) return nil;
-    if (self.failHelper) { if (e) *e = [NSError errorWithDomain:NSCocoaErrorDomain code:4097 userInfo:nil]; return nil; }   // the Xbox Wireless Controller's left handle on the Mac
+    (void)p;
+    if (self.failPattern || self.noAdvanced) {   // gamecontrollerd's answer when it offers no advanced players, after which the engine is unusable
+        if (e) *e = [NSError errorWithDomain:NSCocoaErrorDomain code:NSXPCConnectionInterrupted userInfo:nil];
+        self.broken = YES; return nil;
+    }
+    self.testPlayer = [TestPlayer new]; self.testPlayer.failStart = self.failPlayer; self.testPlayer.failSend = self.failSend;
+    return (id)self.testPlayer;
+}
+- (id<CHHapticPatternPlayer>)createPlayerWithPattern:(CHHapticPattern *)p error:(NSError **)e {
+    assert(p);
+    if (self.failPattern || self.broken) {
+        if (e) *e = [NSError errorWithDomain:CoreHapticsErrorDomain code:CHHapticErrorCodeServerInitFailed userInfo:nil];
+        return nil;
+    }
+    self.plainPlayers++;
     self.testPlayer = [TestPlayer new]; self.testPlayer.failStart = self.failPlayer; self.testPlayer.failSend = self.failSend;
     return (id)self.testPlayer;
 }
@@ -50,7 +66,7 @@
 @property NSMutableArray<TestEngine *> *engines;
 @property NSMutableArray<GCHapticsLocality> *requestedLocalities;
 @property int attempts, failureStage;
-@property BOOL helperLost;   // every engine's player fails with a lost helper connection, as all localities of the Xbox Wireless Controller on the Mac
+@property BOOL noAdvanced;
 @end
 @implementation TestHaptics
 - (instancetype)init {
@@ -65,19 +81,18 @@
     self.attempts++;
     [self.requestedLocalities addObject:locality];
     if (self.attempts == 1 && self.failureStage == 1) return nil;
-    TestEngine *e = [TestEngine new]; [self.engines addObject:e];
+    TestEngine *e = [TestEngine new]; [self.engines addObject:e]; e.noAdvanced = self.noAdvanced;
     if (self.attempts == 1) {
         e.fail = self.failureStage == 2; e.failPattern = self.failureStage == 3;
-        e.failPlayer = self.failureStage == 4; e.failSend = self.failureStage == 5; e.failHelper = self.failureStage == 6;
+        e.failPlayer = self.failureStage == 4; e.failSend = self.failureStage == 5;
         e.resetDuringStart = self.failureStage == 2;
     }
-    if (self.helperLost) e.failHelper = YES;
     return (id)e;
 }
 @end
 @interface TestController : NSObject
 @property TestHaptics *haptics;
-@property NSString *vendorName;
+@property NSString *vendorName, *productCategory;
 @end
 @implementation TestController
 @end
@@ -90,9 +105,6 @@ static void send_pair(float left, float right) {
     dm_haptics_send(u, 2); drain();
 }
 static int made;   // engines the test factories made
-static int hid_finds; static uint8_t hid_last[9]; static int hid_writes;
-static IOHIDDeviceRef fake_hid_find(GCController *c, NSArray *taken) { (void)c; (void)taken; hid_finds++; return (IOHIDDeviceRef)CFRetain(CFSTR("test HID device")); }
-static IOReturn fake_hid_write(IOHIDDeviceRef d, const uint8_t *r, size_t n) { (void)d; assert(n == sizeof hid_last); memcpy(hid_last, r, n); hid_writes++; return kIOReturnSuccess; }
 int main(void) { @autoreleasepool {
     queue = dispatch_queue_create("test.rumble", DISPATCH_QUEUE_SERIAL);
     dispatch_queue_set_specific(queue, &queue, &queue, NULL);
@@ -100,8 +112,8 @@ int main(void) { @autoreleasepool {
     TestEngine *left = [TestEngine new], *right = [TestEngine new];
     dispatch_sync(queue, ^{
         channels[0] = [NSMutableArray new];
-        add_engine(0, @"test left", ^CHHapticEngine *(NSError **e) { (void)e; made++; return (id)left; });
-        add_engine(0, @"test right", ^CHHapticEngine *(NSError **e) { (void)e; made++; return (id)right; });
+        add_engine(0, 0, @"test left", ^CHHapticEngine *(NSError **e) { (void)e; made++; return (id)left; });
+        add_engine(0, 1, @"test right", ^CHHapticEngine *(NSError **e) { (void)e; made++; return (id)right; });
         dm_haptics_route(0, 1);
     }); drain();
     send_pair(0.2, 0.7);
@@ -139,6 +151,10 @@ int main(void) { @autoreleasepool {
         dm_haptics_apple_controller(0, (id)controller); drain();
         assert(dm_haptics_available() & 1);
         send_pair(0.6, 0); drain();
+        if (stage == 3) {   // a refused advanced player is taken as a server without them: plain players from a new engine play at once
+            assert(h.attempts == 2 && h.engines[1].plainPlayers == 1 && dm_haptics_actual(0, 0).amplitude_low == 0.6f);
+            send_pair(0, 0); drain(); continue;
+        }
         assert(h.attempts == 1 && dm_haptics_actual(0, 0).amplitude_low == 0);
         assert(stage == 1 || h.engines[0].handlersAtStart);   // callbacks cover startup itself
         void (^lateReset)(void) = h.engines.firstObject.startingReset;
@@ -154,6 +170,24 @@ int main(void) { @autoreleasepool {
         send_pair(0, 0); drain();
         assert(recovered.testPlayer.levels.lastObject.floatValue == 0);
     }
+    // A server without advanced players (game controllers on macOS 27): the first effect plays at once in plain pulses from a new engine, the pulses
+    // follow each other while it lasts and take its level, and a stop never cuts one (stopAtTime): it silences them and stops the engine after the last
+    TestController *plainc = [TestController new]; plainc.haptics = [TestHaptics new]; plainc.haptics.noAdvanced = YES;
+    dm_haptics_apple_controller(0, (id)plainc); drain();
+    send_pair(0.6, 0); drain();
+    TestEngine *pe = plainc.haptics.engines.lastObject;
+    assert(plainc.haptics.attempts == 2 && pe.plainPlayers == 1 && pe.testPlayer.levels.lastObject.floatValue == 0.6f);
+    assert(dm_haptics_actual(0, 0).amplitude_low == 0.6f);
+    send_pair(0.2, 0); drain();
+    assert(pe.plainPlayers == 1 && pe.testPlayer.levels.lastObject.floatValue == 0.2f);
+    usleep(1100000); drain();
+    int pulses = pe.plainPlayers; assert(pulses >= 3);   // renewed while the effect lasts
+    send_pair(0, 0); usleep(1700000); drain();
+    assert(pe.plainPlayers == pulses && pe.testPlayer.levels.lastObject.floatValue == 0);   // silent: no new pulse
+    assert(pe.stops == 1 && pe.testPlayer.stops == 0);   // the engine stopped after the last pulse, which was not cut
+    send_pair(0.5, 0); drain();
+    assert(plainc.haptics.attempts == 2 && pe.plainPlayers == pulses + 1 && pe.testPlayer.levels.lastObject.floatValue == 0.5f);
+    send_pair(0, 0); drain();
     TestController *split = [TestController new]; split.haptics = [TestHaptics new];
     split.haptics.supportedLocalities = [NSSet setWithObjects:GCHapticsLocalityDefault, GCHapticsLocalityLeftHandle, GCHapticsLocalityRightHandle, nil];
     split.haptics.failureStage = 2;
@@ -169,47 +203,50 @@ int main(void) { @autoreleasepool {
     split2.haptics.failureStage = 3;
     dm_haptics_apple_controller(0, (id)split2); drain();
     send_pair(0.3, 0.4); drain();
-    assert(split2.haptics.attempts == 1 && channels[0].count == 2);   // a player failure keeps the handle route
-    expire_retries(); send_pair(0.3, 0.4); drain();
+    // A refused advanced player turns the handle route into one engine for both motors (the handles' engines override each other without them),
+    // which plays the next send in plain pulses at the mixed level
+    assert(split2.haptics.attempts == 1 && channels[0].count == 1 && channels[0].firstObject.simple);
+    send_pair(0.3, 0.4); drain();
     NSArray *asked = split2.haptics.requestedLocalities;
-    assert(split2.haptics.attempts == 3 && [asked[1] isEqual:GCHapticsLocalityLeftHandle] && [asked[2] isEqual:GCHapticsLocalityRightHandle]);
-    assert(fabsf(split2.haptics.engines[1].testPlayer.levels.lastObject.floatValue - 0.3f) < 1e-6f);
-    assert(fabsf(split2.haptics.engines[2].testPlayer.levels.lastObject.floatValue - 0.4f) < 1e-6f);
-    TestController *split3 = [TestController new]; split3.haptics = [TestHaptics new];   // the player fails as the helper connection is lost (NSCocoaErrorDomain 4097): as an engine failure
-    split3.haptics.supportedLocalities = split.haptics.supportedLocalities;
-    split3.haptics.failureStage = 6;
+    assert(split2.haptics.attempts == 2 && [asked[1] isEqual:GCHapticsLocalityDefault] && split2.haptics.engines[1].plainPlayers == 1);
+    assert(fabsf(split2.haptics.engines[1].testPlayer.levels.lastObject.floatValue - 0.5f) < 1e-6f);
+    send_pair(0, 0); drain();
+    TestController *split3 = [TestController new]; split3.haptics = [TestHaptics new]; split3.haptics.noAdvanced = YES;
+    split3.haptics.supportedLocalities = [NSSet setWithObjects:GCHapticsLocalityDefault, GCHapticsLocalityHandles, GCHapticsLocalityLeftHandle, GCHapticsLocalityRightHandle, nil];
     dm_haptics_apple_controller(0, (id)split3); drain();
-    send_pair(0.3, 0.4); drain();
-    assert(split3.haptics.attempts == 1 && channels[0].count == 1);   // the split route went to the default locality
-    expire_retries(); send_pair(0.3, 0.4); drain();
-    assert(split3.haptics.attempts == 2 && [split3.haptics.requestedLocalities.lastObject isEqual:GCHapticsLocalityDefault]);
-    assert(fabsf(split3.haptics.engines.lastObject.testPlayer.levels.lastObject.floatValue - 0.5f) < 1e-6f);
-    hid_find = fake_hid_find; hid_write = fake_hid_write;
-    TestController *lost = [TestController new]; lost.haptics = [TestHaptics new];   // Core Haptics fails at every locality: the HID report takes over
-    lost.haptics.supportedLocalities = split.haptics.supportedLocalities; lost.haptics.helperLost = YES;
-    dm_haptics_apple_controller(0, (id)lost); drain();
-    send_pair(0.3, 0.4); drain();   // the left handle fails: to the default locality
-    expire_retries(); send_pair(0.3, 0.4); drain();   // the default locality fails: to the HID report
-    assert(lost.haptics.attempts == 2 && hid_finds == 1 && [channels[0].firstObject isKindOfClass:DmHidRumble.class]);
-    send_pair(0.3, 0.4); drain();
-    assert(hid_writes == 1 && hid_last[0] == 3 && hid_last[1] == 0x0F && hid_last[4] == 30 && hid_last[5] == 40 && hid_last[6] == HID_HOLD && hid_last[8] == 0);
-    send_pair(0.3, 0.4); drain(); assert(hid_writes == 1);   // an unchanged value is not resent at once
-    usleep(600000); drain(); assert(hid_writes == 2 && hid_last[4] == 30 && hid_last[5] == 40);   // but sent again before its 1 s report runs out
-    send_pair(0, 0); drain(); assert(hid_writes == 3 && hid_last[4] == 0 && hid_last[5] == 0);
-    usleep(600000); drain(); assert(hid_writes == 3);   // silence is not refreshed, and the stop ended the old value's chain
-    send_pair(0.6, 0); drain(); assert(hid_writes == 4 && hid_last[4] == 60 && hid_last[5] == 0);   // linear, as Core Haptics' intensity
-    dispatch_suspend(queue);   // states that come faster than the reports go out: only the newest is written
-    for (int i = 1; i <= 50; i++) { dm_vibration_update u[] = {{0, 0, {i / 100.0f, 160, 0, 320}}, {0, 1, {0, 160, 0, 320}}}; dm_haptics_send(u, 2); }
-    { dm_vibration_update u[] = {{0, 0, {0, 160, 0, 320}}, {0, 1, {0, 160, 0, 320}}}; dm_haptics_send(u, 2); }
-    dispatch_resume(queue); drain(); assert(hid_writes == 5 && hid_last[4] == 0 && hid_last[5] == 0);
-    send_pair(0.6, 0); drain(); assert(hid_writes == 6 && hid_last[4] == 60);
+    send_pair(0.3, 0.4); send_pair(0.3, 0.4); drain();
+    assert([split3.haptics.requestedLocalities.lastObject isEqual:GCHapticsLocalityHandles]);   // the handles' own group when the controller lists it
+    send_pair(0, 0); drain();
     dm_haptics_apple_controller(0, nil); drain();   // disconnect discards the controller factory and its old callbacks
-    assert(hid_writes == 7 && hid_last[4] == 0);   // and stops the HID motors
     assert(!(dm_haptics_available() & 1));
     TestController *unsupported = [TestController new]; unsupported.haptics = [TestHaptics new];
     unsupported.haptics.supportedLocalities = [NSSet set];
     dm_haptics_apple_controller(0, (id)unsupported); drain();
     assert(!(dm_haptics_available() & 1) && unsupported.haptics.attempts == 0);
+    // DM_RUMBLE_MIN: controller levels below it are silent, the rest stretched over the full range; the phone keeps its levels
+    assert(controller_level(0) == 0 && controller_level(0.3f) == 0.3f && controller_level(1) == 1 && controller_level(NAN) == 0);
+    rumble_min = 0.45f;
+    assert(controller_level(0.4f) == 0 && controller_level(0.45f) == 0 && fabsf(controller_level(0.725f) - 0.5f) < 1e-6f && controller_level(1) == 1);
+    TestController *cut = [TestController new]; cut.haptics = [TestHaptics new];
+    dm_haptics_apple_controller(0, (id)cut); drain();
+    send_pair(0.3, 0); drain();
+    assert(cut.haptics.attempts == 0);   // silent: no engine is made
+    send_pair(0.725, 0); drain();
+    assert(fabsf(cut.haptics.engines.lastObject.testPlayer.levels.lastObject.floatValue - 0.5f) < 1e-6f);
+    send_pair(0, 0); drain();
+    rumble_min = 0;
+    // A DualShock 4 goes through its effects report only while its HID device is there; without one it keeps Core Haptics
+    TestController *ds = [TestController new]; ds.haptics = [TestHaptics new]; ds.productCategory = GCProductCategoryDualShock4;
+    dm_haptics_apple_controller(0, (id)ds); drain();
+    __block BOOL report = NO; dispatch_sync(queue, ^{ report = ds4[0].dev != NULL; });
+    if (!report) {
+        send_pair(0.6, 0); drain();
+        assert(ds.haptics.attempts == 1 && ds.haptics.engines[0].testPlayer.levels.lastObject.floatValue == 0.6f);
+        send_pair(0, 0); drain();
+    }
+    else assert(channels[0].count == 2 && [channels[0][0] isKindOfClass:DmDs4Channel.class] && ds.haptics.attempts == 0);
+    dm_haptics_apple_controller(0, nil); drain();
+    assert(ds4_crc((const uint8_t *)"123456789", 9) == 0xCBF43926u);   // the report's CRC32 (IEEE, reflected)
     dm_haptics_apple_shutdown();
-    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, the default-locality and HID report fallbacks, the HID report refresh and newest-only reports on a lost helper connection and stale callbacks passed");
+    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, level cutoff and the DualShock 4 route passed");
 } }
