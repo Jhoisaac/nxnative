@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # Pack a self-contained, double-clickable Mac app of a game (the NSP script's --platform mac-app): the launcher (dm/mac/launcher.c, linked here with its settings window,
 # dm/mac/Launcher.swift, and the iOS launcher's model and rows) as CFBundleExecutable, the Mac host beside it,
-# and in Contents/Resources what the IPA carries (dm/ios/tools/build_ipa.sh): romfs.img (the RomFS image), msl/<b-chain | vk | gl>/ (the Mac shader libraries, the folder named as in the IPA),
+# and in Contents/Resources what the IPA carries (dm/ios/tools/build_ipa.sh): romfs.img (the RomFS image), msl/<b-chain | vk | gl>/ (the Mac shader libraries, the folder named as in the IPA;
+# an NVN game that also draws with OpenGL ES, --gl, has msl/gl/ beside msl/b-<chain>/),
 # aoc/<index>/ (DLC), pso/ (an NVN game's pipeline archive made offline for this Mac's GPU, dm/gfx/tools/pso_offline.py: the launcher hands it to the host as DM_PSO_BUNDLE),
 # and dm/ (the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv / pso_manifest.tsv / c1_full.tsv / cb_extent.tsv / shader_pairs.tsv / pso_pairs.tsv, font/, env.txt,
 # launcher.json: the game's launcher settings, dm/games/settings.py, which the settings window and Mac front ends show),
@@ -152,7 +153,7 @@ def inventory(root):
 
 def selected_inputs(a):
     """Resolve once: these same lists supply both the reuse key and the copies."""
-    for name in ('patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso'):
+    for name in ('patched', 'romfs', 'msl', 'gl', 'tables', 'font', 'aoc', 'pso'):
         p = getattr(a, name)
         if p and not (rfs.Path(p).is_dir() if name == 'romfs' else Path(p).is_dir()): raise SystemExit(f'no {name} directory at {p}')
     if a.marker and not (rfs.Path(a.romfs) / a.marker).exists(): raise SystemExit(f'no RomFS at {a.romfs} (missing {a.marker})')
@@ -163,17 +164,19 @@ def selected_inputs(a):
             raise SystemExit(f'no rewriter fixups for {p}')
     msls = sorted(p for pat in MSL_FILES for p in Path(a.msl).glob(pat) if p.is_file() and p.name != '_b_build.json')
     if not any(p.suffix == '.metallib' for p in msls): raise SystemExit(f'no shader libraries at {a.msl}')
+    gls = sorted(p for pat in MSL_FILES for p in Path(a.gl).glob(pat) if p.is_file()) if a.gl else []   # an NVN game's GL side layer (msl/gl)
+    if a.gl and not any(p.suffix == '.metallib' for p in gls): raise SystemExit(f'no GL shader library at {a.gl}')
     pso = sorted({p for pat in PSO_FILES for p in Path(a.pso).glob(pat)}) if a.pso else []
     if a.pso and (not any(p.suffix == '.mtl4a' for p in pso) or not (Path(a.pso) / 'prebuilt.tsv').is_file()):
         raise SystemExit(f'no pipeline archive with its prebuilt.tsv in {a.pso}')
     tables = [Path(a.tables) / n for n in TABLES if (Path(a.tables) / n).is_file()]
     pairs = Path(a.pso_pairs) if a.pso_pairs and not any(p.name == 'pso_pairs.tsv' for p in tables) else None
     fonts = sorted(Path(a.font).glob('*.ttf'))
-    files = [Path(a.host)] + mods + msls + pso + tables + fonts + ([pairs] if pairs else [])
+    files = [Path(a.host)] + mods + msls + gls + pso + tables + fonts + ([pairs] if pairs else [])
     files += [Path(p) for p in (a.env_file, a.settings, a.icon) if p]
     for p in files:
         if not p.is_file(): raise SystemExit(f'no input file at {p}')
-    return mods, msls, pso, tables, pairs, fonts, files
+    return mods, msls, pso, tables, pairs, fonts, files, gls
 
 
 def replace_app(tmp, out):
@@ -197,9 +200,9 @@ def pack(a):
     except (OSError, ValueError): previous = None
     try:
         a = argparse.Namespace(**vars(a))
-        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon'):
+        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'gl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon'):
             if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
-        mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
+        mods, msls, pso, tables, pairs, fonts, files, gls = selected_inputs(a)
         clang = Path(run(['xcrun', '--find', 'clang']).strip()).resolve()
         swiftc = Path(run(['xcrun', '--find', 'swiftc']).strip())   # not resolved: the driver is a link to swift-frontend, which acts by its name
         sdk = Path(run(['xcrun', '--sdk', 'macosx', '--show-sdk-path']).strip()).resolve()
@@ -229,7 +232,7 @@ def pack(a):
     romfs, msl, aoc = Path(a.romfs), Path(a.msl), Path(a.aoc) if a.aoc else None
     clone = can_clone(romfs, res); pso_clone = bool(pso) and can_clone(Path(a.pso), res)
     if not clone or (pso and not pso_clone):
-        need = (0 if clone else sum(tree_bytes(d) for d in [romfs] + ([aoc] if aoc else [])) + sum(p.stat().st_size for p in msls)) + (0 if pso_clone else sum(p.stat().st_size for p in pso))
+        need = (0 if clone else sum(tree_bytes(d) for d in [romfs] + ([aoc] if aoc else [])) + sum(p.stat().st_size for p in msls + gls)) + (0 if pso_clone else sum(p.stat().st_size for p in pso))
         free = shutil.disk_usage(res).free
         if need + (1 << 30) > free: raise SystemExit(f'the app needs {need / 2**30:.1f} GB on the volume of {out.parent} (no APFS clones from the build there) and {free / 2**30:.1f} GB are free')
     step(f'launcher and host ({"clones" if clone else "copies"} of the game files)')
@@ -242,6 +245,7 @@ def pack(a):
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
     step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.mkdir(parents=True); copy(msls, msl_dst, clone)
+    if gls: (res / 'msl/gl').mkdir(); copy(gls, res / 'msl/gl', clone)   # the GL side layer beside the chain's folder (the host's GL layer loads <DM_MSL_DIR>/gl)
     if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone)
     if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', pso_clone)
     step('game files'); copy([romfs], res / ('romfs.img' if romfs.is_file() else 'romfs'), clone)
@@ -276,6 +280,7 @@ def parse(argv):
     ap.add_argument('--romfs', required=True, help='the RomFS of the packed version')
     ap.add_argument('--msl', required=True, help='the Mac shader libraries: <shader>/cache/b-<chain>, or a Vulkan or GL game\'s <shader>/vk or gl')
     ap.add_argument('--msl-name', help='its folder name in the app (default: its own)')
+    ap.add_argument('--gl', help='an NVN game\'s GL shader libraries (<shader>/cache/gl: a game that also draws with OpenGL ES, Naruto STORM 4), copied to msl/gl beside --msl')
     ap.add_argument('--tables', required=True, help='the game profile folder (shader_map.tsv and the tables beside it)')
     ap.add_argument('--font', required=True, help='the folder of the shared-font stand-ins (nintendo_ext.ttf)')
     ap.add_argument('--aoc', help='the DLC RomFS images or folders by index')

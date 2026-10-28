@@ -155,6 +155,8 @@ P=Payload/DmIOS.app
 if [ -f "$ROMFS" ]; then MAPS=("$P/romfs.img=$ROMFS"); else MAPS=("$P/romfs=$ROMFS"); fi
 if [ -n "$AOC" ] && [ -d "$AOC" ]; then MAPS+=("$P/aoc=$AOC"); t "add-on content: $(ls "$AOC" | tr '\n' ' ')"; fi
 if [ -n "${PSO:-}" ]; then MAPS+=("$P/pso=$PSO"); fi
+# An NVN game that also draws with OpenGL ES (GLLAYER=1 from the NSP script: Naruto STORM 4's Scaleform UI): its GL library beside the chain's folder, which the host's GL layer loads as msl/gl
+if [ "$GFXAPI" = nvn ] && [ "${GLLAYER:-}" = 1 ]; then [ -f "$MSL_IOS/gl/gl_shaders.metallib" ] || die "no iOS GL shader library $MSL_IOS/gl for the game's GL layer"; MAPS+=("$P/msl/gl=$MSL_IOS/gl"); fi
 MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR" "$P=$APP")
 t "pack IPA (already-compressed game files stored, everything else deflated)"
 # The pulling vertex libraries (<key>_bp, dm/gfx/tools/dmsh_pull.py) serve the hybrid pipelines. Default to the same pso_mtl4 setting compiled by gen_build.py; IOS_PULL=0 / 1 overrides it.

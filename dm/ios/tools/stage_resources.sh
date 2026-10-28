@@ -34,8 +34,10 @@ else
     rm -f "$APP/romfs.img"
 fi
 /usr/bin/rsync -a --delete -- "$DM_RESOURCE_SHADERS/" "$APP/msl/$DM_RESOURCE_MSLDIR/"
+GLSIDE="$(dirname "$DM_RESOURCE_SHADERS")/gl"   # an NVN game's GL side layer (gl_layer), beside the chain's libraries
+case "$DM_RESOURCE_MSLDIR" in b-*) if [ -f "$GLSIDE/gl_shaders.metallib" ]; then mkdir -p "$APP/msl/gl"; /usr/bin/rsync -a --delete -- "$GLSIDE/" "$APP/msl/gl/"; fi;; esac
 for old in "$APP/msl/"*; do
-    [ "$old" = "$APP/msl/$DM_RESOURCE_MSLDIR" ] || rm -rf "$old"
+    [ "$old" = "$APP/msl/$DM_RESOURCE_MSLDIR" ] || { case "$DM_RESOURCE_MSLDIR" in b-*) [ "$old" = "$APP/msl/gl" ] && [ -f "$GLSIDE/gl_shaders.metallib" ] && continue;; esac; rm -rf "$old"; }
 done
 if [ -n "$DM_RESOURCE_AOC" ]; then
     mkdir -p "$APP/aoc"

@@ -34,6 +34,15 @@ class NroGraphics(unittest.TestCase):
         self.assertEqual(s['graphics'][0], 'nvn')
         self.assertFalse(s['glslc_capture'][0])
 
+    def test_gl_layer_beside_nvn(self):   # Naruto Shippuden: Ultimate Ninja STORM 4: NVN, and a Scaleform UI drawn with OpenGL ES into textures (no window surface)
+        s = pg.shader_sources({'nvnBootstrapLoader', 'eglCreateContext', 'eglGetProcAddress', 'eglMakeCurrent'}, 0, [], 0, 0, gl_names=1)
+        self.assertEqual(s['graphics'][0], 'nvn')
+        self.assertTrue(s['gl_layer'][0])
+        for imports, kw in ((SDL_MAIN | {'nvnBootstrapLoader', 'eglCreateContext'}, dict(gl_names=1, gl_files=1)),   # Digimon: a GL game, no side layer
+                            ({'nvnBootstrapLoader', 'eglCreateContext', 'eglGetProcAddress'}, {}),   # Absolum: names no GL function
+                            ({'eglCreateContext', 'eglGetProcAddress'}, dict(gl_names=2, nro_imports={'nvnBootstrapLoader'}))):   # Portal-like: NVN in NROs
+            self.assertFalse(pg.shader_sources(imports, 0, [], 0, 0, **kw)['gl_layer'][0], imports)
+
     def test_load_order(self):
         self.assertEqual(sorted(['sdk', 'subsdk2', 'main', 'subsdk0', 'subsdk10'], key=pg.load_order), ['main', 'subsdk0', 'subsdk2', 'subsdk10', 'sdk'])
 

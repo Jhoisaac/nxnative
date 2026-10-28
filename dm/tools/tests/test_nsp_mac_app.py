@@ -423,6 +423,15 @@ class App(unittest.TestCase):
             a.out = str(self.tmp / 'Own.app'); a.tables = self.args.tables; pack_app.pack(a)
             self.assertEqual((self.tmp / 'Own.app/Contents/Resources/dm/pso_pairs.tsv').read_text(), 'other-vertex\tother-pixel\n')
 
+    def test_gl_side_layer(self):   # an NVN game that also draws with OpenGL ES (--gl): msl/gl beside the chain's folder, with the GL library and its table only
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d, mock.patch.object(pack_app, 'sign', lambda *a: None), mock.patch('sys.stdout'):
+            d = Path(d); (d / 'gl').mkdir(); (d / 'gl/gl_shaders.metallib').write_bytes(b'gl'); (d / 'gl/gl_shaders.tsv').write_text('# t\n'); (d / 'gl/x.metal').write_text('not for the app')
+            a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / 'Gl.app'); a.icon = None; a.gl = str(d / 'gl')
+            pack_app.pack(a)
+            msl = self.tmp / 'Gl.app/Contents/Resources/msl'
+            self.assertEqual(sorted(p.name for p in msl.iterdir()), ['b-0123456789ab', 'gl'])
+            self.assertEqual(sorted(p.name for p in (msl / 'gl').iterdir()), ['gl_shaders.metallib', 'gl_shaders.tsv'])
+
     def test_info_plist(self):
         p = plistlib.loads((self.app / 'Contents/Info.plist').read_bytes())
         self.assertEqual((p['CFBundleExecutable'], p['CFBundleName'], p['CFBundleIdentifier'], p['CFBundleShortVersionString']), ('nxnative', 'Game: Test', 'org.nxnative.01008cf01baac000', '1.0.1'))

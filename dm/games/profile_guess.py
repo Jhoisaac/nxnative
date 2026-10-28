@@ -206,7 +206,7 @@ def nro_modules(exefs, nros, modules, hooks=None):
 def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, gl_src=0, gl_files=0, oodle_pkz=0, nro_imports=frozenset()):
     """{name: (value, reason)}: graphics (vulkan when main imports Vulkan functions and not nvnBootstrapLoader; gl when it imports eglCreateWindowSurface and names glShaderSource, so it compiles
     GLSL through OpenGL (gl_names: how often main has that name; Absolum imports the same EGL functions for SDL3 but renders with NVN and names no GL function); else nvn; vkGetInstanceProcAddr
-    alone is SDL's Vulkan loader, which Balatro's LÖVE links and never uses), vk_capture (a Vulkan game without SPIR-V files generates its shaders at run time), gl_capture (an OpenGL game with no
+    alone is SDL's Vulkan loader, which Balatro's LÖVE links and never uses), vk_capture (a Vulkan game without SPIR-V files generates its shaders at run time), gl_layer (an NVN game whose main imports eglCreateContext and eglGetProcAddress and names glShaderSource: it also draws with OpenGL ES into GL textures that NVN samples, Naruto Shippuden: Ultimate Ninja STORM 4's Scaleform UI, with no window surface; not Portal, whose NVN is in NROs, nor Absolum, which names no GL function), gl_capture (an OpenGL game with no
     GLSL source where gl_shaders.py looks, gl_src strings in main and gl_files files in the RomFS: it puts its shaders together at run time, LÖVE from its Lua), glslc_capture (main holds GLSL sources and calls glslcCompile in a module the game loads: it compiles some shaders at run time), ue_decode (Unreal paks keep the shaders Oodle-compressed
     in their shader code archives, which only the game's own Oodle decodes), oodle_packs (Trinity packs, or oodle_pkz PlatinumGames PKZ archives with Oodle Kraken entries:
     Oodle-compressed file by file, which the shader split decodes with the game's own decoder in the Mac host's tool mode), ue_legacy (Unreal paks whose shaders are inline in the cooked packages:
@@ -221,11 +221,13 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
     nro_nvn = 'nvnBootstrapLoader' in nro_imports
     gl = not vulkan and not nro_nvn and 'eglCreateWindowSurface' in imports and bool(gl_names)
     nro_glslc = not vulkan and not gl and 'glslcCompile' in nro_imports and bool(glslc_mods)
+    gl_layer = not vulkan and not gl and not nro_nvn and 'eglCreateContext' in imports and 'eglGetProcAddress' in imports and bool(gl_names)
     return {'graphics': ('vulkan', f'main imports {vk} Vulkan functions and not nvnBootstrapLoader: the host\'s Vulkan layer (dm/gfx/vk/hle_vk.m)') if vulkan else
                         ('gl', 'main imports EGL and names glShaderSource: it renders with OpenGL and compiles GLSL, the host\'s GL layer (dm/gfx/gl/hle_gl.m)') if gl else
                         ('nvn', 'the NROs the game loads import nvnBootstrapLoader' if nro_nvn and 'nvnBootstrapLoader' not in imports else 'main imports nvnBootstrapLoader'),
             'vk_capture': (vulkan and not spirv, 'no SPIR-V file in the RomFS: the game generates its shaders at run time (Super Mario Galaxy), captured by booting it on the Mac'),
             'gl_capture': (gl and not gl_src and not gl_files, 'no GLSL source in the RomFS or main: the game puts its shaders together at run time (LÖVE: Balatro), captured by booting it on the Mac'),
+            'gl_layer': (gl_layer, 'main imports EGL (eglCreateContext, eglGetProcAddress) and names glShaderSource while it renders with NVN: it also draws with OpenGL ES into GL textures (Naruto STORM 4\'s Scaleform UI), the host\'s GL layer beside the NVN one; its GL shaders are captured by booting it on the Mac'),
             'glslc_capture': (not vulkan and not gl and bool(glsl_src) and 'glslcCompile' in imports and bool(glslc_mods) or nro_glslc,
                               f'the NROs the game loads call glslcCompile in {", ".join(glslc_mods)}: shaders compiled at run time (Portal), captured by booting it on the Mac' if nro_glslc and not (glsl_src and 'glslcCompile' in imports) else
                               f'main holds {glsl_src} GLSL sources and calls glslcCompile in {", ".join(glslc_mods) or "no module it loads"}: shaders compiled at run time (Fire Emblem: Three Houses), captured by booting it on the Mac'),

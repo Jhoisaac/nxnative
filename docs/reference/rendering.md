@@ -827,6 +827,13 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Fix:** `profile_guess.py` `shader_sources` now reads the imports of the loose NROs in the RomFS (`romfs_nro_imports`): when one imports `nvnBootstrapLoader`, the game is an NVN game whatever `main` imports. Digimon keeps the GL rule: it has no NRO.
 - **Found on:** [Portal](../../dm/games/01007BB017812000/README.md).
 
+### An NVN game that also draws with OpenGL ES
+
+- **Symptom:** a Mac app of Naruto Shippuden: Ultimate Ninja STORM 4 packed by the NSP script would carry no GL shader library: the game is NVN (`main imports nvnBootstrapLoader`), so the script built only the chain's libraries, while its Scaleform UI is drawn with OpenGL ES through EGL into GL textures that NVN samples; its 387 GL shaders had been captured and translated by hand.
+- **Cause:** the script handled one graphics API per game. `main` imports `eglCreateContext` and `eglGetProcAddress` and names `glShaderSource`, but not `eglCreateWindowSurface` (it draws into textures, not a window), so the GL rule rightly does not apply.
+- **Fix:** `profile_guess.py` `shader_sources` reports `gl_layer` for an NVN game whose `main` imports `eglCreateContext` and `eglGetProcAddress` and names `glShaderSource` (not Portal, whose NVN is in NROs; not Absolum, which names no GL function). The NSP script then boots the game once with its NVN libraries and `DM_GL_CAPTURE` (`capture_shaders` with `msl`; Naruto creates all 387 within its first minute), translates the capture with `gl_shaders.py` into `<shader>/cache/gl/` beside `b-<chain>/` (`build_gl_shaders` with `side`), and the Mac app (`pack_app.py --gl`) and the IPA (`GLLAYER=1`) carry `msl/gl/` beside the chain's folder, which the host's GL layer loads from `DM_MSL_DIR` as before.
+- **Found on:** Naruto Shippuden: Ultimate Ninja STORM 4 (provisional profile).
+
 ### Which GL functions a game calls
 
 - **Symptom:** a jump to address 0 right after `glGetFloatv(0xb12)` (`lr=main+0x2d58c4`).

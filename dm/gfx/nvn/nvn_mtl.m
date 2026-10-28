@@ -2426,7 +2426,10 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d) {
     return mt;
 }
 static id<MTLTexture> tex_mtl_(const tex_t *ct) {
-    tex_t *t = (tex_t *)ct;
+    // One snapshot of the texture object for the whole resolution. Recorded commands carry it in the game's command memory (tex_snap), which another guest thread can record
+    // into again while this one is still creating the texture: Naruto STORM 4's loader threads replay copies on the command buffer its render thread re-records the movie planes
+    // into every frame, and the serial read again after the create gave the loader's texture to the movie's luma serial for good (green and red streaks in the story movies)
+    tex_t snap; if (ct) { snap = *ct; } tex_t *t = ct ? &snap : NULL;
     if (!t || !t->serial) return nil;
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(70, "texture object no longer valid (magic %#x, first case ser=%llu): no MTLTexture created", t->magic, (unsigned long long)t->serial); return nil; }
     // A sampled texture in a sparse virtual pool holds what the CPU wrote into the physical pages mapped there (Monster Hunter Rise: the hunter's innerwear, ASTC 6x6 with no packaged
@@ -9009,7 +9012,8 @@ static int tex_level_ok(id<MTLTexture> t, NSUInteger level, const char *what) {
     RED_ONCE(116, "%s at level %lu of a texture with %lu levels: skipped (first case)", what, (unsigned long)level, (unsigned long)t.mipmapLevelCount);
     return 0;
 }
-static void copy_t2b(const p_copy_b2t *c) {
+static void copy_t2b(const p_copy_b2t *rec) {
+    p_copy_b2t cc = *rec; tex_t tt; if (cc.tex) { tt = *cc.tex; cc.tex = &tt; } const p_copy_b2t *c = &cc;   // one snapshot of the record and its texture (see tex_mtl_)
     rp_flush();   // Materialize pending clears before reading, matching copy_t2t.
     g_wr_epoch++; g_mdx_epoch++;
     if (c->tex) xv_check(c->tex->serial, c->has_view && c->view.set_levels ? c->view.base_level : 0, c->has_view && c->view.set_layers ? c->view.min_layer : 0, "texture-to-buffer copy");
@@ -9142,7 +9146,8 @@ static void mirror_rb_land(void *p) {   // the submission's completion handler
     mrb_note(m->t.serial, -1);
     free(m);
 }
-static void copy_b2t(const p_copy_b2t *c) {
+static void copy_b2t(const p_copy_b2t *rec) {
+    p_copy_b2t cc = *rec; tex_t tt; if (cc.tex) { tt = *cc.tex; cc.tex = &tt; } const p_copy_b2t *c = &cc;   // one snapshot of the record and its texture (see tex_mtl_)
     if (c->tex) zskip_del(c->tex->serial);
     id<MTLTexture> t = tex_mtl(c->tex);
     if (!t) { PD("C ser=%llu (no host texture)", c->tex->serial); return; }

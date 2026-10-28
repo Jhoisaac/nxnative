@@ -1185,12 +1185,13 @@ def capture_done(d, api):   # keys of the whole files in a capture folder
     return {k for k in map(CAPTURES[api]['key'], names) if k}
 
 
-def capture_shaders(repo, d, patched, work, env, logs, g, api):
+def capture_shaders(repo, d, patched, work, env, logs, g, api, msl=None):
     """Shaders no game file holds, made at run time: a Vulkan game without SPIR-V files (Super Mario Galaxy: Hagi's GX shaders, from its pipeline database) or an OpenGL game whose GLSL is put
     together at run time (Balatro: LÖVE adds its header and its built-in code to each of the game's shader files, in Lua). The game boots in the Mac host (headless and silent, no shader
     library) with DM_VK_CAPTURE (dm/gfx/vk/hle_vk.m) or DM_GL_CAPTURE (dm/gfx/gl/hle_gl.m), which writes each shader to <version dir>/vk_capture or gl_capture, where vk_shaders.py /
     gl_shaders.py read them with the RomFS; the shaders are the same on every run. The run stops once every key the profile's capture table lists is there; without the table, once none has
-    been added for 20 s. A folder that already holds every listed key is reused"""
+    been added for 20 s. A folder that already holds every listed key is reused. msl: an NVN game's shader libraries (<shader>/cache), for a GL side layer (gl_layer: Naruto STORM 4's Scaleform UI),
+    so the game runs with its NVN libraries and the profile's shader map; without it the run has no shader library"""
     C = CAPTURES[api]; want, out = capture_wanted(g, api), d / f'{api}_capture'
     PROG.stage(f'{C["name"]} shader capture')
     if want and capture_done(out, api) >= want:
@@ -1201,7 +1202,8 @@ def capture_shaders(repo, d, patched, work, env, logs, g, api):
     rmtree(cap); rmtree(rd); cap.mkdir(parents=True)
     for x in ('save', 'temp', 'msl'): (rd / x).mkdir(parents=True)
     # everything the run writes stays in <id>_build (DM_ROOT is already there): a fresh save and temporary storage, an empty shader library folder (pipelines fail, the game still creates every shader)
-    henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), **{C['env']: str(cap)})
+    henv = dict(env, DM_ROMFS=str(rfs.source(d)), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(msl or rd / 'msl'), **{C['env']: str(cap)},
+                **({'DM_NVN_SHMAP': str(g.table('shader_map.tsv'))} if msl else {}))
     PROG.set(step='booting the game', done=0, total=len(want) if want else None, unit='shaders')
     say(f'booting the game in the Mac host to capture the {C["what"]} at run time → {out}')
     t0 = time.time(); last = {'n': 0, 't': t0}
@@ -1602,20 +1604,20 @@ def shader_regressions(py, repo, lib_dir, chain, logs):
                      'ALLOW_SHADER_REGRESSIONS = True (--allow-shader-regressions) packs the app without those shaders')
 
 
-def layer_shaders(py, repo, api, name, roots, sh, key, logs, env, mac):
+def layer_shaders(py, repo, api, name, roots, sh, key, logs, env, mac, side=False):
     """What build_vk_shaders and build_gl_shaders share: dm/gfx/tools/<api>_shaders.py on the roots → sh/<api>/ for the Mac and, unless mac (a Mac-only build), sh/ios/<api>/ for the iPhone.
     Returns the folder the host (DM_MSL_DIR) or build_ipa.sh (MSL_IOS) takes the libraries from. key: the inputs' fingerprint (None never reuses). The iOS libraries' key is sh/ios/<api>.key,
     the Mac's sh/<api>.key, which an iOS build writes too (it builds both), so a Mac-only build is reused after either; an iOS build after a Mac-only one translates again.
-    Otherwise the old output is deleted first, so a failed run leaves nothing for build_ipa.sh or the host to pick up; the translator's temporary files go to WORK (on the NSP folder's volume)"""
-    ios = sh / 'ios'; out = sh if mac else ios
+    side: an NVN game's GL side layer (gl_layer), whose Mac libraries go to sh/cache/<api>/ beside the chain's b-<chain>/ (the folder DM_MSL_DIR names). Otherwise the old output is deleted first, so a failed run leaves nothing for build_ipa.sh or the host to pick up; the translator's temporary files go to WORK (on the NSP folder's volume)"""
+    ios = sh / 'ios'; macdir = sh / 'cache' if side else sh; out = macdir if mac else ios
     kf, kmac, lib, log = ios / f'{api}.key', sh / f'{api}.key', out / api / f'{api}_shaders.metallib', logs / f'{api}_shaders.log'
     note = next((n for k in ((kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None) if key else None
     if lib.is_file() and note is not None:
         PROG.end(f'{note}, reused (inputs unchanged)'); return out
     PROG.set(step='translating')
-    rmtree(kmac); rmtree(sh / api)
+    rmtree(kmac); rmtree(macdir / api)
     if not mac: rmtree(kf); rmtree(ios / api)
-    run([py, repo / f'dm/gfx/tools/{api}_shaders.py', *roots, sh] + ([] if mac else ['--ios', ios]), log, env=dict(env, TMPDIR=env['WORK']))
+    run([py, repo / f'dm/gfx/tools/{api}_shaders.py', *roots, macdir] + ([] if mac else ['--ios', ios]), log, env=dict(env, TMPDIR=env['WORK']))
     if not lib.is_file(): raise BuildError(f'no {"Mac" if mac else "iOS"} {name} shader library in {lib.parent}')
     m = re.search(r'macosx: (\d+)' if mac else r'iphoneos: (\d+)', log.read_text(errors='replace'))
     note = f'{int(m.group(1)):,} shaders for the Mac' + ('' if mac else ' and iOS') if m else ''
@@ -1633,14 +1635,15 @@ def build_vk_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, p
     return layer_shaders(py, repo, 'vk', 'Vulkan', roots, sh, key, logs, env, mac)
 
 
-def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False):
+def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False, side=False):
     """An OpenGL game's GLSL sources (roots: the RomFS, main, a run-time capture folder) → one Metal library each for the Mac (sh/gl/) and the iPhone (sh/ios/gl/, what build_ipa.sh takes from MSL_IOS;
-    not with mac), replacing the NVN split and chain build, as build_vk_shaders does for a Vulkan game; glslang (glslangValidator) compiles the GLSL to SPIR-V for spirv-cross"""
+    not with mac), replacing the NVN split and chain build, as build_vk_shaders does for a Vulkan game; glslang (glslangValidator) compiles the GLSL to SPIR-V for spirv-cross.
+    side: an NVN game's GL side layer (gl_layer), beside the chain's libraries: the Mac's in sh/cache/gl/ (layer_shaders)"""
     PROG.stage('GL shaders', step='checking the inputs')
     if not shutil.which('glslangValidator', path=env['PATH']): raise BuildError('glslangValidator not found (brew install glslang): it compiles an OpenGL game\'s GLSL shaders')
     key = fingerprint(*[('stat' if provisional else 'tree', r) if Path(r).is_dir() else ('files', [r]) for r in roots], ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env),
                       ('cmd', ['glslangValidator', '--version']), env=env) if reuse else None
-    return layer_shaders(py, repo, 'gl', 'GL', roots, sh, key, logs, env, mac)
+    return layer_shaders(py, repo, 'gl', 'GL', roots, sh, key, logs, env, mac, side)
 
 
 class IpaWatch:
@@ -1796,10 +1799,11 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
-def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus=''):
+def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', gl=False):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in, or a Vulkan or GL game's <shader>, whose vk / gl goes in), the DLC, the profile's tables (with the shader pairs
-    the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS), the launcher settings and an environment file.
+    the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS), the launcher settings and an environment file; gl: an NVN game's
+    GL side layer, whose libraries (msl/gl) go in beside the chain's.
     The save and the log go to the player's Library, keyed by the folder's title ID (app); a new app replaces the old one only when it is complete"""
     lib = msl / (f'b-{chain_of(repo)}' if gfx == 'nvn' else 'vk' if gfx == 'vulkan' else 'gl')
     pso = mac_pso(py, repo, work, lib, g, gpus, env, logs) if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file() else None   # a stage of its own, before the app's
@@ -1814,6 +1818,7 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),
                    ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings)):
         if v: cmd += [opt, v]
+    if gl: cmd += ['--gl', msl / 'gl']   # an NVN game's GL side layer (gl_layer): <shader>/cache/gl, beside b-<chain>
     unchanged = False
     def line(ln):
         nonlocal unchanged
@@ -2030,12 +2035,13 @@ def main(args=None):
     vkcap = gfx == 'vulkan' and src['vk_capture'][0]   # SPIR-V shaders the game generates at run time, captured in the Mac host (capture_shaders)
     glcap = gfx == 'gl' and src['gl_capture'][0]   # GLSL the game puts together at run time (LÖVE), captured in the Mac host (capture_shaders)
     uedec = gfx == 'nvn' and src['ue_decode'][0]   # Unreal Engine shaders, Oodle-compressed in the paks' shader code archives, decoded in the Mac host (decode_ue_shaders)
+    gllayer = gfx == 'nvn' and src['gl_layer'][0]   # an NVN game that also draws with OpenGL ES (Naruto STORM 4's Scaleform UI): its GL shaders captured and translated beside the NVN ones
     if gfx == 'vulkan': say(f'Vulkan game ({src["graphics"][1]}): vk_shaders.py translates the shaders instead of the NVN shader chain')
     if gfx == 'gl': say(f'OpenGL game ({src["graphics"][1]}): gl_shaders.py translates the shaders instead of the NVN shader chain')
     if gfx == 'nvn': check_metal(py, repo, env)   # before the captures and the shader split, which take minutes
-    for on, k in ((glslc, 'glslc_capture'), (vkcap, 'vk_capture'), (glcap, 'gl_capture'), (uedec, 'ue_decode'), (gfx == 'nvn' and src['oodle_packs'][0], 'oodle_packs'), (gfx == 'nvn' and src['ue_legacy'][0], 'ue_legacy')):
+    for on, k in ((glslc, 'glslc_capture'), (vkcap, 'vk_capture'), (glcap, 'gl_capture'), (gllayer, 'gl_layer'), (uedec, 'ue_decode'), (gfx == 'nvn' and src['oodle_packs'][0], 'oodle_packs'), (gfx == 'nvn' and src['ue_legacy'][0], 'ue_legacy')):
         if on: say(src[k][1])
-    PROG.add(glslc + vkcap + glcap + uedec + (gfx == 'nvn'))
+    PROG.add(glslc + vkcap + glcap + uedec + (gfx == 'nvn') + 2 * gllayer)
     aoc = extract_aoc(nx, keys, repo, work, app, fam, logs)
     dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
     base = next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # the folder the base game was extracted to alone
@@ -2092,12 +2098,15 @@ def main(args=None):
             return g
         pkey = split_shaders(py, repo, [rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle, dlc_roms, derive_installed_dlc if not own else None)
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac)
+        if gllayer:   # the GLSL it builds at run time, captured with its NVN libraries in place (they draw its 3D), translated into <shader>/cache/gl (Mac) and <shader>/ios/gl beside b-<chain>
+            cap = capture_shaders(repo, game, patched, work, env, logs, g, 'gl', msl=sh / 'cache')
+            build_gl_shaders(py, repo, [cap], sh, env, logs, g, reuse=not ALLOW_DAMAGED, mac=mac, provisional=bool(provisional or derived), side=True)
     icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)   # the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files
         host, font = mac_host(py, repo, work, env, logs, g)
         if not icon: say('[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, args.env_file or DM_ENV_FILE,
-                (args.gpu or PSO_GPUS).strip())
+                (args.gpu or PSO_GPUS).strip(), gl=gllayer)
         rmtree(work / 'tmp')
         say(f'done: {out_ipa} ({tree_size(out_ipa)[1] / 2**30:.1f} GB); '
             f'open it from Finder. Its save is in ~/Library/Application Support/nxnative/{app:016X}/, its log in ~/Library/Logs/nxnative/{app:016X}.log')
@@ -2114,7 +2123,7 @@ def main(args=None):
 
     if not prepare_xcode and free_gb(out_ipa.parent) < 5: raise BuildError(f'less than 5 GB free on the volume of {out_ipa.parent}')
     say('preparing the Xcode project' if prepare_xcode else f'building the IPA → {out_ipa}')
-    ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(rfs.source(game)), MSL_IOS=str(ios), GFXAPI=gfx, FONT_PY=py, DM_DISPLAY_NAME=app_name, DM_BUNDLE_ID=bundle_id, AOC=str(aoc or ''), DM_XCODE_DERIVED_DATA=str(work / 'xcode-derived-data'), DM_TEAM_ID=team_id, DM_LANG=lang)
+    ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(rfs.source(game)), MSL_IOS=str(ios), GFXAPI=gfx, GLLAYER='1' if gllayer else '', FONT_PY=py, DM_DISPLAY_NAME=app_name, DM_BUNDLE_ID=bundle_id, AOC=str(aoc or ''), DM_XCODE_DERIVED_DATA=str(work / 'xcode-derived-data'), DM_TEAM_ID=team_id, DM_LANG=lang)
     if prepare_xcode: ipa_env['DM_XCODE_PROJECT_DIR'] = str(project.parent)
     if app_version: ipa_env['DM_APP_VERSION'] = app_version
     if icon: ipa_env['DM_ICON'] = str(icon); say(f'app icon: {icon}')   # app icon (found above)
