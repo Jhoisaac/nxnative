@@ -320,4 +320,68 @@ class MaskedComplement(unittest.TestCase):
         self.assertEqual(self.run_site(self.words()), [8] + self.TARGETS[1:])
 
 
+def bls(frm, to): return 0x54000009 | (((to - frm) >> 2) & 0x7ffff) << 5
+
+
+class CheckBeforeCopy(unittest.TestCase):
+    """#396: the bounds check may be separated from the load by the table base being built between
+    them, and the index may be the checked register zero-extended after the check (Crash Bandicoot
+    N. Sane Trilogy main+0x997b5c, Crash Team Racing Nitro-Fueled main+0x5ae924). The copy is searched
+    over the function's control flow (My Hero One's Justice 2 main+0x1c58cac)."""
+
+    def bounds(self, words, idx):
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        self.assertEqual(len(ins), len(words))
+        ld = next(p for p in ins if p.mnemonic == 'ldrsw')
+        cmp = scope['check_before_copy'](ins, ins[:ins.index(ld) + 3], ld, idx)
+        m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', cmp.op_str) if cmp is not None else None
+        return None if cmp is None or not m else (m.group(1), int(m.group(2), 0) + 1)
+
+    def test_base_setup_between_check_and_load(self):
+        # mov w18,w14; cmp w14,#3; b.hi; adrp x2; add x2,x2,#0x3a0; ldrsw x18,[x2,x18,lsl #2]; add x18,x18,x2; br x18
+        ins = (0x2a0e03f2, 0x71000ddf, 0x540000c8, 0x90000002, 0x910e8042, 0xb8b27852, 0x8b020252, 0xd61f0240)
+        self.assertEqual(self.bounds(ins, {'w18'}), ('w14', 4))
+
+    def test_masked_index_after_the_check(self):
+        # cmp w8,#3; b.hi; and x18,x8,#0xffffffff; ldrsw x18,[x17,x18,lsl #2]; add x18,x18,x17; br x18
+        ins = (0x71000d1f, 0x540000a8, 0x92407d12, 0xb8b27a32, 0x8b110252, 0xd61f0240)
+        self.assertEqual(self.bounds(ins, {'w18'}), ('w8', 4))
+
+    def test_copy_far_before_the_check(self):
+        # mov w0,w18; nop; nop; cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18 (DRAGON QUEST XI S main+0x2dd8cd0)
+        ins = (0x2a1203e0, NOP, NOP, 0x7100125f, 0x54000088, 0xb8a07972, 0x8b0b0252, 0xd61f0240)
+        self.assertEqual(self.bounds(ins, {'w0'}), ('w18', 5))
+
+    def test_wrong_mask_rejects_the_site(self):
+        # cmp w8,#3 (four entries need every value 0..3 kept); and x18,x8,#2 keeps only 2 of them
+        ins = (0x71000d1f, 0x540000a8, 0x927f0112, 0xb8b27a32, 0x8b110252, 0xd61f0240)
+        self.assertIsNone(self.bounds(ins, {'w18'}))
+
+    def test_index_written_between_copy_and_load(self):
+        # mov w18,w5; cmp w5,#3; b.hi; add w18,w5,#1; ldrsw x18,[x2,x18,lsl #2]; add x18,x18,x2; br x18
+        ins = (0x2a0503f2, 0x71000cbf, 0x540000a8, 0x110004b2, 0xb8b27852, 0x8b020252, 0xd61f0240)
+        self.assertIsNone(self.bounds(ins, {'w18'}))
+
+    def guarded(self, writer=NOP, guard=None):
+        # mov w0,w18; (writer); cmp w18,#4; b.ls load; b check; add x18,x18,#0x48 (on the way out); b out; check: cmp w18,#4; b.hi 20; load: ldrsw x18,[x11,x0,lsl #2];
+        # add x18,x18,x11; br x18; out: ret. The block before the load writes x18 but never reaches it (My Hero One's Justice 2 main+0x1c58cac)
+        return (0x2a1203e0, writer, 0x7100125f, guard or bls(12, 36), B(16, 28), ADDI(18, 18, 0x48), B(24, 48), 0x7100125f, bhi(32, 20),
+                0xb8a07972, 0x8b0b0252, 0xd61f0240, RET)
+
+    def test_copy_on_every_path_over_the_control_flow(self):
+        self.assertEqual(self.bounds(self.guarded(), {'w0'}), ('w18', 5))
+
+    def test_a_write_on_one_path_rejects_the_site(self):
+        self.assertIsNone(self.bounds(self.guarded(writer=mov(0, 1, False)), {'w0'}))
+
+    def test_a_branch_to_the_load_must_be_a_guard(self):
+        self.assertIsNone(self.bounds(self.guarded(guard=BEQ(12, 36)), {'w0'}))
+
+    def test_no_branch_may_enter_between_the_check_and_the_load(self):
+        # cbz w1 to the add of the base setup (past the check), then the site of test_base_setup_between_check_and_load
+        ins = (0x340000a1, 0x2a0e03f2, 0x71000ddf, 0x540000c8, 0x90000002, 0x910e8042, 0xb8b27852, 0x8b020252, 0xd61f0240)
+        self.assertIsNone(self.bounds(ins, {'w18'}))
+
+
 if __name__ == '__main__': unittest.main()
