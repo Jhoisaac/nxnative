@@ -247,6 +247,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** such a pass draws into a colour shadow of the same pixel size, copied in before and back after the pass through a buffer, as a compressed render target is ([Compressed textures as render targets through an uncompressed shadow](#compressed-textures-as-render-targets-through-an-uncompressed-shadow); `shrt_block`; D16 and D32F, whose Metal pixel is the NVN pixel; not D24S8).
 - **Found on:** [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md).
 
+### A depth texture sampled through a colour view
+
+- **Symptom:** the first frames abort in Metal's validation: `_mtlValidateArgumentsForTextureViewOnDevice` … `source texture pixelFormat (MTLPixelFormatDepth32Float) not compatible with texture view pixelFormat (MTLPixelFormatR32Float)`, right after `texture upgraded to allow format views … base format 252 → view format 55`.
+- **Cause:** the texture pool registers a depth texture with a colour view format of the same pixel (a D32F depth buffer as R32_FLOAT) and a shader samples it as a plain float texture. On the GPU this reads the depth bits; Metal makes no colour view of a depth texture (`tex_by_id` asked for one, after upgrading the texture for format views, which does not make the pair legal).
+- **Fix:** a D32F texture read through an R32F view, or a D16 one through R16_UNORM, is bound as the depth texture itself (`depth_colour_alias` in `nvn_mtl.m`): a depth texture bound to a `texture2d<float>` argument reads the depth in `.x`, the value the colour view reads. No view is made and the depth buffer is not upgraded for format views. Open: an integer view of a depth texture (R32_UINT) would need a copy and is not handled; `clear_tex` has the same view pattern for a clear through a colour view and was not reached.
+- **Found on:** Burnout Paradise Remastered (0100DBF01000A000, a provisional profile, not in the games table): pass 23 downsamples the 1600×900 D32F scene depth into an 800×450 R32F target with four `.sample(...).x` reads through texture ID 257 (registered as R32F).
+
 ### The same texture attached at two colour slots
 
 - **Symptom:** a G-buffer target holds only scattered squares (a different order for each 32×32 tile).
