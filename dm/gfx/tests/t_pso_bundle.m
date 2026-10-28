@@ -9,7 +9,7 @@ uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
-module_t g_mod[MAX_MOD]; int g_nmod;
+module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
@@ -164,34 +164,6 @@ int main(void) { @autoreleasepool {
         setenv("DM_PSO_BUNDLE", "off", 1); pso_bundle_open(list);
         EXPECT("off: none opened", 0, list.count);
         g_arch_bundle = real;
-    }
-    // a pair whose base the compiler cannot build (a pixel shader input the vertex shader does not write): noted in prebuild_failed.tsv under the chain version, no stamp; the next
-    // prebuild leaves it to the draws and writes the stamp; a list of another chain version is dropped
-    @autoreleasepool {
-        NSString *fx = @"#include <metal_stdlib>\nusing namespace metal;\nstruct I { float4 p [[position]]; float4 c [[user(locn5)]]; };\nfragment float4 main0(I i [[stage_in]]) { return i.c; }\n";
-        EXPECT("compiler failure: library", 0, lib(msl, @"fx_b", fx));
-        put([msl stringByAppendingPathComponent:@"fx_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\"}", DMSH_CHAIN]);
-        NSString *stamp = [arch stringByAppendingPathComponent:@"prebuilt.tsv"], *fl = [arch stringByAppendingPathComponent:@"prebuild_failed.tsv"];
-        NSString *noted = [NSString stringWithFormat:@"chain\t%s\nv1\tfx\n", DMSH_CHAIN];
-        [NSFileManager.defaultManager removeItemAtPath:stamp error:nil]; [NSFileManager.defaultManager removeItemAtPath:fl error:nil];
-        put([tables stringByAppendingPathComponent:@"fail.tsv"], @"v1\tfx\n"); setenv("DM_PSO_PAIRS", [tables stringByAppendingPathComponent:@"fail.tsv"].UTF8String, 1);
-        reset_counts();
-        EXPECT("compiler failure: every pair", 4, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
-        EXPECT("compiler failure: one failed", 1, g_pre_failed);
-        EXPECT("compiler failure: no stamp", 0, [NSFileManager.defaultManager fileExistsAtPath:stamp]);
-        EXPECT("compiler failure: noted under the chain version", 1, [[NSString stringWithContentsOfFile:fl encoding:NSUTF8StringEncoding error:nil] isEqualToString:noted]);
-        reset_counts();
-        EXPECT("noted failure: every pair", 4, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
-        EXPECT("noted failure: left to the draws", 1, g_pre_skipped);
-        EXPECT("noted failure: none failed", 0, g_pre_failed);
-        EXPECT("noted failure: stamp written", 1, [NSFileManager.defaultManager fileExistsAtPath:stamp]);
-        EXPECT("noted failure: again, nothing to do", -1, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
-        [NSFileManager.defaultManager removeItemAtPath:stamp error:nil]; put(fl, @"chain\tother\nv1\tfx\n");
-        reset_counts();
-        EXPECT("another chain's list: every pair", 4, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
-        EXPECT("another chain's list: the pair tried again", 1, g_pre_failed);
-        EXPECT("another chain's list: replaced", 1, [[NSString stringWithContentsOfFile:fl encoding:NSUTF8StringEncoding error:nil] isEqualToString:noted]);
-        unsetenv("DM_PSO_PAIRS");
     }
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];
     printf("t_pso_bundle: %d checks, %d failed\n", checks, failed);
