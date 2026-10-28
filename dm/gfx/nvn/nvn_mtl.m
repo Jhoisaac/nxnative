@@ -3095,6 +3095,11 @@ static int shrt_block(MTLPixelFormat f, int *side) {   // bytes per block of a t
     int bb = bc_block_bytes(f); if (bb) { *side = 4; return bb; }
     *side = 1; return f == MTLPixelFormatDepth16Unorm ? 2 : f == MTLPixelFormatDepth32Float ? 4 : 0;
 }
+// A depth texture read through a colour view of the same pixel (the NVN pool registers a D32F buffer as R32_FLOAT, a D16 one as R16_UNORM, to sample it as a plain colour texture): Metal has no colour view
+// of a depth texture (newTextureViewWithPixelFormat aborts in validation), but a depth texture bound to a texture2d<float> reads the depth in .x, the same value the NVN colour view reads
+static int depth_colour_alias(MTLPixelFormat base, MTLPixelFormat view) {
+    return (base == MTLPixelFormatDepth32Float && view == MTLPixelFormatR32Float) || (base == MTLPixelFormatDepth16Unorm && view == MTLPixelFormatR16Unorm);
+}
 static int mtl_fmt_depth(MTLPixelFormat f) { return f == MTLPixelFormatDepth16Unorm || f == MTLPixelFormatDepth32Float || f == MTLPixelFormatDepth32Float_Stencil8 || f == MTLPixelFormatX32_Stencil8 || f == MTLPixelFormatStencil8; }
 // The shadow's format: the view's, when the base is BC (or a depth format, above) and the view is an uncompressed colour format with one block's bytes per pixel
 static int bcrt_view(id<MTLTexture> base, const view_t *v, int has_v, MTLPixelFormat *pf_out) {
@@ -4148,6 +4153,7 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
         uint32_t pf = (uint32_t)base.pixelFormat; uint8_t swz[4];
         if (r.v.set_format && !(nvn_fmt_to_mtl(r.v.format, &pf, swz) && pf)) pf = (uint32_t)base.pixelFormat;
         if (stv) pf = MTLPixelFormatX32_Stencil8;
+        if (!stv && depth_colour_alias(base.pixelFormat, (MTLPixelFormat)pf)) pf = (uint32_t)base.pixelFormat;   // sampled as the depth itself (depth_colour_alias)
         if (r.v.set_format && nvn_fmt_bc(rp->t.d.format) && !nvn_fmt_bc(r.v.format)) {   // the raw blocks of a BC texture through an uncompressed view (see rt_view_fmt): Metal has no such view
             RED_ONCE(86, "Metal cannot create the raw-block view of a compressed texture (NVN format %#x → view %#x): treated as an empty slot", rp->t.d.format, r.v.format);
             return nil;
