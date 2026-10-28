@@ -568,7 +568,7 @@ def check_before_copy(insl, ctx, ld, idx):
         if ctx[bi].mnemonic == 'b.hi' and bi >= 1 and ctx[bi - 1].mnemonic == 'cmp':
             m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', ctx[bi - 1].op_str)
             if m: cmp_i = bi - 1; break
-    if cmp_i is None: return None
+    if cmp_i is None or m is None: return None
     src, n = m.group(1), int(m.group(2), 0) + 1
     full = (1 << (n - 1).bit_length()) - 1   # the bits every index below n can use
     at = {p.address: q for q, p in enumerate(insl)}
