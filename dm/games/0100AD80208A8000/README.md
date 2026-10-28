@@ -30,7 +30,7 @@ About 4.3 GB resident and 2.1 GB of Metal allocations in battle.
 
 ## Input
 
-On the Mac every Core Haptics locality of the Xbox Wireless Controller (Bluetooth LE) fails to make a player (NSCocoaErrorDomain 4097, the connection to gamecontrollerd's haptics service interrupted), so the host falls back to the controller's HID rumble report; the log shows two `[RED] haptics` lines once, then `uses the controller's HID rumble report`.
+On the Mac the Xbox Wireless Controller's haptics server offers no advanced pattern players: every locality refused one with NSCocoaErrorDomain 4097 ("Couldn't communicate with a helper application"), which this branch first answered with the controller's HID rumble report. The host now plays plain players in 0.5 s pulses instead ([Controller haptic engines without advanced players](../../../docs/reference/services.md#controller-haptic-engines-without-advanced-players)); the log says the controller has no advanced players.
 
 ## Found on this game
 
@@ -38,8 +38,7 @@ General changes first needed here; each applies to every game:
 
 - **A system register read into x18** (`patch_nso.py` `emit_slot_copy`): one `mrs x18, tpidr_el0` among 3,812 `tpidr_el0` reads crashed the RHI thread ([System register reads into x18](../../../docs/reference/rewriter.md#system-register-reads-into-x18)).
 - **Event descriptors** (`hle_net.c` `nn::socket::EventFd`, unit test `t_net`): gRPC's `poll` engine aborted at boot without them ([Event descriptors for gRPC's poll engine](../../../docs/reference/services.md#event-descriptors-for-grpcs-poll-engine)).
-- **Pipeline archive compaction compiles the bases again from source** (`nvn_mtl.m` `g_compact_opts`): with the old files as the compiler's lookup archives, Metal's serializer crashed at the first start with 15 archive files and 421 bases taken from them. A compaction costs one full compile of those bases in the prewarm's background time (421 bases, about 8 s; the next start took all 491 from the one file in 32 ms).
-- **Xbox Wireless Controller rumble over its HID report when Core Haptics fails** (`haptics_apple.m`, above).
+- **Pipeline archive compaction without lookup archives**: with the old files as the compiler's lookup archives, Metal's serializer crashed at the first start with 15 archive files and 421 bases taken from them; first fixed here by compiling the bases again, then upstream fixed it the same way, capturing them from the original shader functions, with a guard for a compaction that does not finish ([A compaction flush that crashes, then crashes every start](../../../docs/reference/shaders.md#a-compaction-flush-that-crashes-then-crashes-every-start)).
 - The Mac audio device's 5 ms callbacks: CRI ADX2's 6-channel output keeps 3 × 240 frames in flight, so with the default 512-frame callbacks every 8th one found 496 frames queued and padded 16 (exactly 250 underruns and 83 ms in each 2000 callbacks: a click every 85 ms) ([The Mac's default I/O buffer](../../../docs/reference/audio.md#the-macs-default-io-buffer)).
 
 ## Open
