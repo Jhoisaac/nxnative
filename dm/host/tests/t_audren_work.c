@@ -72,10 +72,10 @@ void *objmap_del(const void *key) {
     void *value = map_value; map_key = map_value = NULL; return value;
 }
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack) {
-    (void)fn; (void)arg; (void)prio; (void)stack; starts++; return (void *)1;
+    (void)fn; (void)prio; (void)stack; starts++; return arg;   // the thread handle is the renderer it renders
 }
 void dm_guest_thread_join(void *tt) {
-    assert(tt == (void *)1 && !atomic_load(&g_open));
+    assert(tt && !atomic_load(&((ar_t *)tt)->open));
     assert(((uint8_t *)sdk_work)[SDK_WORK - 1] == 0x5a);   // storage also survives the render thread
     joins++;
 }
@@ -90,6 +90,9 @@ void hle_bind_system_event(void *ev, int ac) {
     assert(ev == sdk_event && ac == 1 && event_destroys == event_binds + 1);
     event_binds++;
 }
+
+uint64_t hle_system_event_binding(void *ev) { (void)ev; return 1; }
+int hle_signal_system_event_binding(uint64_t b) { (void)b; return 0; }
 
 int main(void) {
     uint8_t param[P_SIZE] = {0}, saved[P_SIZE];

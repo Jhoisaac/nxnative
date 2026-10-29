@@ -20,6 +20,8 @@ int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }
 void *dm_pcmout_released(void *k) { (void)k; return NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
 void hle_bind_system_event(void *ev, int ac) { (void)ev; (void)ac; }
+uint64_t hle_system_event_binding(void *ev) { (void)ev; return 0; }
+int hle_signal_system_event_binding(uint64_t b) { (void)b; return 0; }
 
 enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
 static int32_t mix[NMIX * SAMPLES];
@@ -48,6 +50,8 @@ static size_t build(int sdk, int ncmd) {
     return (size_t)(q - list);
 }
 
+static ar_t ar;   // one renderer's state: capture takes the renderer it belongs to
+
 static void test_headers(void) {
     const int sdks[] = {4, 6, 16, 21};
     for (size_t i = 0; i < sizeof sdks / sizeof *sdks; i++) {
@@ -67,7 +71,7 @@ static void test_headers(void) {
     }
     g_hdr6 = g_hdr21 = 0;
     int16_t out[FRAME_MAX * 2];
-    for (size_t n = 0; n < 0x20; n++) assert(capture(list, n, out) == 0);
+    for (size_t n = 0; n < 0x20; n++) assert(capture(&ar, list, n, out) == 0);
 }
 
 static void test(int sdk, int incomplete) {
@@ -79,24 +83,24 @@ static void test(int sdk, int incomplete) {
     // An empty startup list must not choose a layout either.
     size_t n = build(sdk, NCMD);
     *(uint32_t *)(list + 4) = 0;
-    assert(capture(list, 0x20, out) == 0);
+    assert(capture(&ar, list, 0x20, out) == 0);
     if (incomplete) {
         // The third command is zeroed, as Mario Kart 8 Deluxe's first list was. Several such frames must leave detection open.
         n = build(sdk, NCMD);
         memset(list + 0x20 + 2 * 0x40, 0, 0x40);
-        for (int i = 0; i < 3; i++) assert(capture(list, n, out) == 0);
+        for (int i = 0; i < 3; i++) assert(capture(&ar, list, n, out) == 0);
         assert(!g_hdr6 && !g_hdr21 && !g_sink4);
     }
 
     // SDK 21 starts with short valid lists: detect its header before the first full list's sink scan.
     n = build(sdk, sdk == 21 ? 2 : NCMD);
-    int got = capture(list, n, out);
+    int got = capture(&ar, list, n, out);
     assert(g_hdr6 == (sdk <= 6) && g_hdr21 == (sdk == 21) && g_sink4 == (sdk == 4));
     assert(g_sink_id == (sdk == 4 ? 0xf : sdk == 6 ? 0x10 : sdk == 21 ? 0x14 : 0x13));
     assert(got == SAMPLES);
     for (int s = 0; s < SAMPLES; s++) assert(out[2 * s] == 1000 && out[2 * s + 1] == -1000);
     n = build(sdk, NCMD);
-    assert(capture(list, n, out) == SAMPLES);   // detection stays valid for later full frames
+    assert(capture(&ar, list, n, out) == SAMPLES);   // detection stays valid for later full frames
 }
 
 int main(void) {

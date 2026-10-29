@@ -27,6 +27,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_fpslock
 	$(B)/t_audren_work
 	$(B)/t_audren_layout
+	$(B)/t_audren_multi
 	$(B)/t_swkbd
 	$(B)/t_altstack
 	$(B)/t_condvar
@@ -71,6 +72,12 @@ $(B)/t_audren_layout: t_audren_layout.c ../hle_audren.c ../hle.h ../dm.h $(GAME_
 .PHONY: audren-layout
 audren-layout: $(B)/t_audren_layout
 	$(B)/t_audren_layout
+run: $(B)/t_audren_multi
+$(B)/t_audren_multi: t_audren_multi.c ../hle_audren.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audren_multi.c
+.PHONY: audren-multi
+audren-multi: $(B)/t_audren_multi
+	$(B)/t_audren_multi
 $(B)/t_system_event: t_system_event.c ../hle_thread.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_system_event.c
 .PHONY: system-event
