@@ -706,6 +706,47 @@ def mtarc_shaders(d, label, out):
     for path, m in mtarc_members(d, label):
         if m[:4] == MTSPK: out.extend(mtspk_shaders(m, f'{label}#{path}'))
 
+BND2 = b'bnd2'
+def bnd2_shaders(d, label):
+    """Criterion's resource bundle ('bnd2', version 2; Burnout Paradise Remastered keeps all of its 242 shaders in SHADERS.BNDL, beside main's 138 GLSLC outputs). Header (u32 each): magic,
+    version, platform, +0xC the debug data's offset (XML, one <Resource id="…" type="…" name="…"/> per resource), +0x10 the resource count, +0x14 the entry table's offset, +0x18..+0x20 the
+    start of each of the three data blocks, +0x24 flags. Each 0x40-byte entry: u32 resource ID (+0), per block the uncompressed size (+0x10.., the low 28 bits; the alignment above), the stored
+    size (+0x1C..) and the offset in that block (+0x28..), +0x34 the import table's offset in block 0, +0x38 the type ID, +0x3C the import count. Each block of a resource is a zlib stream.
+    A PixelShader or VertexShader resource's block 1 is one whole GLSLC output (glslc_shaders); its block 0 is a small header. A Shader resource (the technique) imports {u64 resource ID,
+    u32 pointer offset, u32 0} its passes' shaders in vertex, pixel order, which gives the pairs the engine draws (121 in Burnout). The compressed bytes never show a shader magic, so the
+    generic prefilter dropped the file. Only bundles whose debug data names a shader type are decoded (one of Burnout's 2,200 bundles); a bundle without debug data is not read.
+    → (found, {(vertex key, pixel key)})"""
+    dbg, n, tab = struct.unpack_from('<3I', d, 0xC)
+    starts = struct.unpack_from('<3I', d, 0x18)
+    if not 0x28 <= dbg <= tab or tab + 0x40 * n > len(d) or any(s > len(d) for s in starts): red(f'{label}: bnd2 header out of bounds')
+    types = {int(i, 16): t.decode() for i, t in re.findall(rb'<Resource id="([0-9a-fA-F]+)" type="(\w+)"', d[dbg:tab])}
+
+    def block(w, b):
+        usz, csz, off = w[4 + b] & 0xfffffff, w[7 + b], w[10 + b]
+        if not csz: return b''
+        z = zlib.decompressobj(); a = starts[b] + off
+        data = z.decompress(d[a:a + csz], usz)
+        if len(data) != usz or not z.eof: red(f'{label}: resource block {b} of {w[0]:08x} gives {len(data):#x} bytes, the entry says {usz:#x}')
+        return data
+    found, by_id, techniques = [], {}, []
+    for i in range(n):
+        w = struct.unpack_from('<16I', d, tab + 0x40 * i)
+        t = types.get(w[0])
+        if t in ('PixelShader', 'VertexShader'):
+            got = glslc_shaders(block(w, 1), f'{label}#r{w[0]:08x}', need=False)
+            if len(got) != 1 or got[0][1] != ('ps' if t == 'PixelShader' else 'vs'): red(f'{label}: {t} {w[0]:08x} holds {len(got)} GLSLC outputs, not one of its stage')
+            found += got; by_id[w[0]] = got[0]
+        elif t == 'Shader' and w[15]: techniques.append(w)
+    pairs = set()
+    for w in techniques:
+        b0 = block(w, 0)
+        ids = [struct.unpack_from('<Q', b0, w[13] + 16 * k)[0] for k in range(w[15])]
+        refs = [by_id[r] for r in ids if r in by_id]
+        for v, p in zip(refs[::2], refs[1::2]):
+            if v[1] != 'vs' or p[1] != 'ps': red(f'{label}: Shader {w[0]:08x} imports {v[1]}, {p[1]}, not a vertex shader and then a pixel shader')
+            pairs.add((skey(v[2], v[3]), skey(p[2], p[3])))
+    return found, pairs
+
 SCNE, ZSTD_MAGIC = b'SCNE', bytes.fromhex('28b52ffd')
 LZ4_FRAME_MAGIC = bytes.fromhex('04224d18')   # the frame of HAL's other .cmp container (the ubin/ map data)
 def bea_members(d, label):
@@ -2217,6 +2258,14 @@ def scan_file_in(args):
     if head[:8] == GFPAK:   # a Game Freak archive (gfpak_members): each entry scanned as a file of its own (the shaders are BNSH entries)
         for nm, m in gfpak_members(open(path, 'rb').read(), '/' + rel): scan_blob(m, f'/{rel}{nm}', found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == BND2:   # a Criterion bundle (bnd2_shaders): its shaders are in zlib streams
+        with open(path, 'rb') as f: d = f.read(0x28)
+        dbg, tab = struct.unpack_from('<I', d, 0xC)[0], struct.unpack_from('<I', d, 0x14)[0]
+        with open(path, 'rb') as f: f.seek(dbg); xml = f.read(max(0, tab - dbg))
+        if b'type="PixelShader"' not in xml and b'type="VertexShader"' not in xml: return rel, {}, set(), {}
+        with open(path, 'rb') as f: got, pairs = bnd2_shaders(f.read(), '/' + rel)
+        found += got
+        return rel, uniq_keys(found), var_pairs(found) | pairs, trees
     if head[:4] == b'SRYK':
         import vbf
         with open(path, 'rb') as f:

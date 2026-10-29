@@ -160,6 +160,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Note:** `CustomShaderPackage.mfx` (`MFX\0`, the effect descriptions) holds no shader code, and neither `main` nor any other ARC entry does.
 - **Found on:** [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (Capcom's MT Framework): all 460 build, with Mario's binding layout; every binding decodes.
 
+### GLSLC outputs in Criterion's bnd2 bundles
+
+- **Symptom:** the game boots and draws its menus, but in game `[RED] shader … is not in the shader map` for many keys and the world is not drawn; the split found only main's GLSLC outputs.
+- **Cause:** the shaders are resources of a Criterion `bnd2` bundle (version 2), each block of a resource a zlib stream, so no shader magic shows in the file and the generic prefilter dropped it. The header holds the debug data's offset (XML naming each resource's ID and type), the resource count, the entry table's offset and the three blocks' starts. Each 0x40-byte entry gives the resource ID, per block the uncompressed size (low 28 bits), the stored size and the offset, the import table's offset in block 0, the type ID and the import count. A `VertexShader` or `PixelShader` resource's block 1 is one whole GLSLC output. A `Shader` resource (a technique) imports its passes' shaders `{u64 ID, u32 pointer offset, u32 0}` in vertex, pixel order.
+- **Fix:** `shader_split.py` recognizes `bnd2` by magic before the prefilter and decodes only bundles whose debug data names a shader type (`bnd2_shaders`). Each shader resource must hold exactly one GLSLC output of its stage. The techniques' imports give the exact pairs, beside the [single-stage cover](#single-stage-programs-paired-with-a-cover). A bundle without debug data is not read. Test: `dm/gfx/tests/test_bnd2.py`.
+- **Found on:** Burnout Paradise Remastered (0100DBF01000A000, a provisional profile, not in the games table): `SHADERS.BNDL` holds 242 shader resources (238 keys: 117 vertex, 121 pixel; none shared with main's 138) and 86 techniques giving 121 pairs; the 154 keys a run asked for and missed are all among them. Its other 2,200 bundles name no shader type.
+
 ### PKZ version 1 archives
 
 - **Symptom:** `[RED] ... PKZ version 0x10000: only 0x20000 is known` stops the shader split.
