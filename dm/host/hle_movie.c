@@ -728,7 +728,8 @@ static int md_out_tex(mdec_t *d, int i, void *buf) {
     if (!p || cap < 8) { LOG("[RED] movie: client buffer in native-texture mode is %zu bytes, needs 8 (a texture object)", cap); return 0x100b; }
     void *tex = p; int tw = 0, th = 0, f = nvn_host_write_texture(tex, NULL, 0, 0, 0, &tw, &th);
     if (f < 0) { LOG("[RED] movie: buffer data %p in native-texture mode is not a texture object", tex); return 0x100b; }
-    if (f != 0x25 && f != 0x38 && f != 0x6d && f != 0x37 && !d->red_img++) LOG("[RED] movie: client texture format %#x is not RGBA8 / RGBX8 (sRGB included), writing in RGBA byte order", f);   // Metroid Dread: RGBX8_SRGB
+    if (f != 0x25 && f != 0x38 && f != 0x6d && f != 0x37 && !(f >= 0x99 && f <= 0x9c) && !d->red_img++)   // Metroid Dread: RGBX8_SRGB; DRAGON BALL Z: KAKAROT: BGRA8 (nvn_host_write_texture swaps)
+        LOG("[RED] movie: client texture format %#x is not RGBA8 / RGBX8 / BGRA8 / BGRX8 (sRGB included), writing in RGBA byte order", f);
     int w = d->w < tw ? d->w : tw, h = d->h < th ? d->h : th;
     // No picture (an end-of-stream output): nothing is drawn and the texture keeps the last frame, as the SDK's consumer has no frame to draw. A black frame here flashed at the
     // end of every loop of Big Brain Academy: Brain vs. Brain's activity previews, which read the end-of-stream output's buffer

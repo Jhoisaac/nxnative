@@ -136,6 +136,14 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Fix:** the host converts the VP9 picture to RGBA (BT.709 / BT.601 and range from the stream) and writes it into the texture's storage like `WriteTexels`, then marks the sync as signalled (`nvn_host_write_texture` / `nvn_host_signal_sync` in `hle_nvn.c`). The host writes the texture's block-linear storage on the CPU and the replay layer re-uploads the dirtied pages, as for `WriteTexels` ([nvn-objects.md](nvn-objects.md)).
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
 
+### Native-texture output into BGRA8 / BGRX8 textures
+
+- **Symptom:** a movie's colours have red and blue swapped (peach skin blue-white, brown rock blue, grass lime) while the engine's own rendering is right; the log has `[RED] movie: client texture format 0x9a is not RGBA8 / RGBX8 (sRGB included), writing in RGBA byte order`.
+- **Cause:** the client's texture is `NVN_FORMAT_BGRA8` (0x9a; BGRX8 and the sRGB pair are 0x99, 0x9b, 0x9c), which keeps blue in the first byte of each texel, and the host wrote its RGBA bytes (`md_rgba` / `take_rgba`) into it as they were. Sampling the texture (Metal BGRA8Unorm) then read the red byte as blue.
+- **Fix:** `nvn_host_write_texture` (`hle_nvn.c`) swaps the first and third byte of each texel when the texture's format is `NVN_FORMAT_BGRX8` through `NVN_FORMAT_BGRA8_SRGB`, honouring the source's row pitch; `md_out_tex` (`hle_movie.c`) no longer reports those formats. The formats 0x25, 0x37, 0x38 and 0x6d take the unchanged path.
+- **Found on:** DRAGON BALL Z: KAKAROT (title 010051C0134F8000, Unreal Engine 4.24; a provisional profile, not in the games table): its movie decoder (CRI Sofdec, VP9, the SDK movie library in native-texture mode, mode 2) is given a BGRA8 texture. The opening movie's frames (Dragon Ball, logo, sky) have the right colours after the fix.
+- **Check:** `t_movie_bgra` writes RGBA texels (200, 100, 50) into 4x4 textures and reads the memory back: BGRA8 (also with a row pitch beyond the width), BGRX8 and the sRGB pair hold 50, 100, 200; RGBA8 and RGBX8_SRGB keep 200, 100, 50; a non-texture returns -1.
+
 ### SDK 4's `movie::Buffer` has no sync object
 
 - **Symptom:** `FATAL movie: missing SDK symbol _ZNK5movie6Buffer10GetNvnSyncEv` at the first frame of the native-texture movie (H.264 into the game's RGBA texture, as in Monster Hunter Rise).
