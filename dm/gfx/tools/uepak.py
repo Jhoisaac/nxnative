@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Unreal Engine game files for the shader tools: pak files (version 11, UE 4.26 and later; Octopath Traveler 0 is UE5), shader code archives (.ushaderbytecode version 2) and the job files the Mac host decodes Oodle with
+# Unreal Engine game files for the shader tools: pak files (versions 4, 7, 8, 9 and 11: UE 4.18 to 4.25 and 4.26 and later; Octopath Traveler 0 is UE5), shader code archives (.ushaderbytecode version 2) and the job files the Mac host decodes Oodle with
 # (DM_OODLE_JOB, dm/host/hle_oodle.c). Octopath Traveler 0 keeps everything in one pak, Octopath_Traveler0/Content/Paks/pakchunk0-Switch.pak (1.5 GB, 159,757 files): its index is AES-256 encrypted,
 # its files are stored or Oodle-compressed in blocks. Its two shader code archives are stored, but every shader inside is Oodle-compressed (Mermaid, block header 8C 0A), which no decoder in this
 # repository can undo, so the game's own OodleLZ_Decompress decodes them in the Mac host (the NSP script's decode_ue_shaders, for any game with Unreal paks).
@@ -28,6 +28,9 @@
 #   (i64, from the file start before version 5, from the entry after), the encrypted flag (u8) and the compression block size (u32). The FPakEntry is repeated in front of the data.
 #   The compression flags are no names: 1 zlib, 2 gzip, 4 custom; DRAGON QUEST XI S's engine uses 3, which is LZ5 2.0 (main exports LZ5_*; every block starts with its level, 0x2d = 45), and only the
 #   game's own decoder reads it (hle_oodle.c, through a decode function given to Pak.read).
+# Versions 7 (UE 4.21/4.22: the footer adds the key GUID in front of the flag, still read from its last 0x2d bytes), 8 (UE 4.23/4.24: the footer ends with five 32-byte method names, magic 0xcc from the
+#   end, and an entry's method is 1-based into them) and 9 (UE 4.25: magic 0xcd from the end, a u8 frozen index flag between the SHA-1 and the names) keep that per-file index; a version 9 pak may write it
+#   as a frozen memory image instead (Pak.frozen). Shaders are zlib streams in 4.21 to 4.24 and LZ4 blocks in 4.25. UE 4.25 also keeps packages in IoStore containers (TOC version 2, ExportBundleData is type 2).
 # Unreal Engine 4.27 with bShareMaterialShaderCode off (OCTOPATH TRAVELER II: Majesty/Content/Paks/Majesty-Switch.pak, version 11, 3.3 GB / 376,601 files, index not encrypted, Zlib blocks)
 #   has no shader code archive at all: each material keeps its shaders in its own cooked package (.uexp) and the engine's global shaders are in Engine/GlobalShaderCache-SF_GLSL_SWITCH.bin,
 #   every shader an LSLG record stored without compression, as in a legacy pak (inline_shaders; shader_split.py ue_legacy_jobs reads them). Zlib and LZ4 blocks are decoded here (Pak.read).
@@ -153,14 +156,14 @@ class R:
         if n < 0: return self.raw(-2 * n).decode('utf-16-le')[:-1]
         return self.raw(n)[:-1].decode('utf-8', 'replace') if n else ''
 
-LEGACY = (4,)   # legacy pak versions read (the per-file index); 11 has the encoded one
+LEGACY = (4, 7, 8, 9)   # pak versions with the per-file index (4: UE 4.18; 7: UE 4.21/4.22; 8: 4.23/4.24, compression named in the footer; 9: 4.25, named, and the index may be a frozen memory image); 11 has the encoded one
 LEGACY_METHODS = {1: 'Zlib', 2: 'Gzip', 3: 'LZ5', 4: 'Custom'}   # compression flags of a legacy pak (3: DRAGON QUEST XI S's engine, see the header)
 
 def magic_back(f):
     """(how far from the end the footer's magic is, the pak version): a legacy footer is the last 0x2d bytes (magic 0x2c from the end); version 11's magic is 0xc8 from the end in
     Octopath Traveler 0 (UE5) and 0xcc in Unreal Engine 4.27 (DRAGON QUEST VII Reimagined: five whole 32-byte compression method names after the SHA-1)"""
     size = f.seek(0, 2)
-    for back, foot in ((0x2c, 0x2d), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21)):
+    for back, foot in ((0x2c, 0x2d), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21), (0xcd, 0xcd + 21)):   # 0xcc: version 8 as well (UE 4.23/4.24: five 32-byte names); 0xcd: version 9 (one more byte, the frozen index flag, before the names)
         if size < foot: continue   # shorter than this footer
         f.seek(-back, 2); m, ver = struct.unpack('<II', f.read(8))
         if m == PAK_MAGIC: return back, ver
@@ -172,17 +175,24 @@ def pak_version(f):
 def footer(f):
     """(encrypted index, index offset, index size, compression method names by number from 1, version); ValueError when the index does not lie inside the file"""
     back, ver = magic_back(f)
-    if (ver in LEGACY or ver == 11) and (ver in LEGACY) != (back == 0x2c): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
-    if ver in LEGACY:
+    if ver not in LEGACY and ver != 11: raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
+    if (ver in (4, 7)) != (back == 0x2c): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
+    if ver in (4, 7):   # no names in the footer (version 7 adds the key GUID in front of the flag)
         f.seek(-0x2d, 2); ft = f.read(0x2d); ioff, isz = struct.unpack_from('<QQ', ft, 9)
         enc, methods = ft[0], [LEGACY_METHODS.get(i, f'flags {i}') for i in range(1, 8)]
-    elif ver != 11: raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
-    else:
+    else:   # versions 8, 9 and 11: the methods are named; version 9 has the frozen index flag (u8) between the SHA-1 and the names
         f.seek(-(back + 21), 2); ft = f.read(back + 21); k = 21
         ioff, isz = struct.unpack_from('<QQ', ft, k + 8)
-        enc, methods = ft[k - 1], [ft[k + 44 + 32 * i:k + 76 + 32 * i].rstrip(b'\0').decode('latin1') for i in range(5)]
+        n0 = k + 44 + (ver == 9)
+        enc, methods = ft[k - 1], [ft[n0 + 32 * i:n0 + 32 * i + 32].rstrip(b'\0').decode('latin1') for i in range(5)]
     if ioff + isz > f.seek(0, 2): raise ValueError(f'the index ({isz:#x} bytes at {ioff:#x}) runs past the end of the pak')
     return enc, ioff, isz, methods, ver
+
+def frozen_index(f):
+    """Whether a version 9 pak (UE 4.25) writes its index as a frozen memory image (the flag byte right after the index SHA-1: Kimetsu no Yaiba - The Hinokami Chronicles 1)"""
+    back, ver = magic_back(f)
+    if ver != 9: return False
+    f.seek(-(back + 21), 2); return f.read(back + 21)[21 + 44] == 1
 
 def read_range(f, off, n, what):
     """n bytes of the file at off, after checking that they lie inside it: a size from a damaged pak would otherwise be allocated by f.read first (up to 2^64)"""
@@ -205,6 +215,7 @@ class Pak:
         self.path, self.key = path, key; self.f = open(path, 'rb')
         enc, ioff, isz, self.methods, self.version = footer(self.f)
         if enc and not key: raise ValueError(f'{path}: the index is encrypted and no key was given')
+        if self.version == 9 and frozen_index(self.f): self.frozen(self.read_at(ioff, isz, enc)); return
         r = R(self.read_at(ioff, isz, enc), what=f'{path}: the index')
         self.mount = r.fstr(); self.count = r.take('<i')
         if self.version in LEGACY:   # one FPakEntry per file, kept as parsed
@@ -215,7 +226,8 @@ class Pak:
                 e, bsz = r.take('<BI'); head = 53 + (4 + 16 * len(blocks) if meth else 0)
                 if self.version < 5: blocks = [(s - off, t - s) for s, t in blocks]
                 else: blocks = [(s, t - s) for s, t in blocks]
-                self.files[name] = dict(off=off, raw=raw, size=size, method=LEGACY_METHODS.get(meth, f'flags {meth}') if meth else '', encrypted=e, block_size=bsz, blocks=blocks or [(head, size)])
+                if self.version >= 8 and meth > len(self.methods) or meth and self.version >= 8 and not self.methods[meth - 1]: raise ValueError(f'{path}: {name} names compression method {meth}, which the footer does not')
+                self.files[name] = dict(off=off, raw=raw, size=size, method=(self.methods[meth - 1] if self.version >= 8 else LEGACY_METHODS.get(meth, f'flags {meth}')) if meth else '', encrypted=e, block_size=bsz, blocks=blocks or [(head, size)])
             return
         r.take('<Q')
         if r.take('<i'): r.take('<QQ'); r.raw(20)   # path hash index (not needed with the full directory index)
@@ -227,6 +239,40 @@ class Pak:
         for _ in range(d.take('<i')):
             dn = d.fstr()
             for _ in range(d.take('<i')): fn = d.fstr(); self.files[(dn + fn).lstrip('/')] = d.take('<i')
+    def frozen(self, b):
+        """Version 9 with a frozen index (UE 4.25, a TMemoryImage written to the pak): every pointer is relative, a u64 whose bit 0 is set and whose upper bits are the byte distance from the pointer's own place.
+        Root: FString mount point (ptr, i32 num, i32 max) at 0; TArray<FPakEntry> at 0x10 (80-byte entries: i64 offset, size, raw size, SHA-1 padded to 24, TArray<FPakCompressedBlock> (16-byte blocks:
+        i64 start, end, relative to the entry), u32 block size, u32 method (1-based, the footer's names), u8 flags, padded); the directory TSet<TTuple<FString, FPakDirectory>> at 0x20: sparse array elements
+        of 80 bytes (FString directory name; its TMap<FString, i32> elements pointer and count at +16; the rest is the bit array and the hash), each file element 32 bytes (FString name, i32 index into
+        the entries, hash link). Checked on Kimetsu no Yaiba - The Hinokami Chronicles 1 (UE 4.25: pakchunk0-Switch.pak, 1,284 files, and pakchunk1-Switch.pak, 88)"""
+        what = f'{self.path}: the frozen index'; self.b = b
+        def at(o, n):   # o, after checking that n bytes from it lie inside the index
+            if not 0 <= o <= len(b) - n: raise ValueError(f'{what}: {n:#x} bytes at {o:#x} do not fit in its {len(b):#x}')
+            return o
+        def ptr(slot):
+            v = struct.unpack_from('<Q', b, at(slot, 8))[0]
+            if not v & 1: raise ValueError(f'{what}: the pointer at {slot:#x} is not set')
+            return at(slot + (v >> 1), 0)
+        def fstr(slot):
+            n = struct.unpack_from('<i', b, at(slot + 8, 4))[0]
+            if n <= 0: return ''
+            p = ptr(slot); return b[at(p, 2 * n):p + 2 * (n - 1)].decode('utf-16-le')
+        self.mount = fstr(0); entries = []
+        n = struct.unpack_from('<i', b, at(0x18, 4))[0]; ep = ptr(0x10)
+        for k in range(n):
+            o = at(ep + 80 * k, 80); off, size, raw = struct.unpack_from('<qqq', b, o); nb = struct.unpack_from('<i', b, o + 56)[0]
+            bp = ptr(o + 48) if nb else 0; bsz, meth = struct.unpack_from('<II', b, o + 64); fl = b[o + 72]
+            if meth > len(self.methods) or meth and not self.methods[meth - 1]: raise ValueError(f'{what}: entry {k} names compression method {meth}, which the footer does not')
+            blocks = [(s, t - s) for s, t in (struct.unpack_from('<qq', b, at(bp + 16 * i, 16)) for i in range(nb))]
+            entries.append(dict(off=off, raw=raw, size=size, method=self.methods[meth - 1] if meth else '', encrypted=fl & 1, block_size=bsz, blocks=blocks or [(53 + (4 + 16 * nb if meth else 0), size)]))
+        self.files = {}; dp = ptr(0x20)
+        for k in range(struct.unpack_from('<i', b, at(0x28, 4))[0]):
+            o = at(dp + 80 * k, 80); dn = fstr(o); nf = struct.unpack_from('<i', b, o + 24)[0]; fp = ptr(o + 16) if nf else 0
+            for i in range(nf):
+                q = at(fp + 32 * i, 32); j = struct.unpack_from('<i', b, q + 16)[0]
+                if not 0 <= j < len(entries): raise ValueError(f'{what}: {dn}{fstr(q)} names entry {j} of {len(entries)}')
+                self.files[(dn + fstr(q)).lstrip('/')] = entries[j]
+        self.count = len(self.files)
     def read_at(self, off, n, enc):
         if enc and not self.key: raise ValueError(f'{self.path}: {n:#x} encrypted bytes at {off:#x} and no key was given')
         b = read_range(self.f, off, (n + 15) & ~15 if enc else n, self.path)
@@ -344,6 +390,11 @@ class Toc:
         o += 12 * nblk
         self.methods = [b[o + mlen * i:o + mlen * (i + 1)].rstrip(b'\0').decode('latin1') for i in range(nmeth)]
         self.index = {c: i for i, c in enumerate(self.ids)}; self.files = {}
+    def export_bundles(self):
+        """Indices of the cooked packages' chunks (ExportBundleData): type 1 in Unreal Engine 5 (TOC version 4 and later), 2 in UE 4.25 to 4.27 (Kimetsu no Yaiba - The Hinokami Chronicles 1: TOC version 2; its
+        chunk types are 2 ExportBundleData, 3 BulkData, 10 ContainerHeader, and 7, 8, 9 the loader's global metadata, names and name hashes in global.utoc)"""
+        t = IO_EXPORT_BUNDLE if self.version >= 4 else IO_EXPORT_BUNDLE_UE4
+        return [i for i, c in enumerate(self.ids) if c[11] == t]
     def of_type(self, t):
         """Indices of the chunks of one EIoChunkType (Unreal Engine 5 numbering: TOC version 4 and later)"""
         return [i for i, c in enumerate(self.ids) if c[11] == t] if self.version >= 4 else []
@@ -414,6 +465,7 @@ def io_archive(toc, i, decode, chunk=None):
     return bytes(out) + b''.join(code)
 
 IO_EXPORT_BUNDLE = 1   # EIoChunkType ExportBundleData in Unreal Engine 5: a cooked package's exports
+IO_EXPORT_BUNDLE_UE4 = 2   # the same chunk type in UE 4.25 to 4.27 (TOC versions 2 and 3)
 OODLE_HEAD, LSLG_AT = re.compile(b'[\x8c\xcc][\x06\x0a\x0b\x0c]'), re.compile(b'LSLG')   # an Oodle stream's first block header (Kraken, Mermaid, Selkie or Leviathan); a stored record
 TAG_FREQ = {'SV': 0, 'SH': 1, 'SD': 2, 'SP': 3, 'SG': 4, 'SC': 5}   # LSLG stage tag → EShaderFrequency
 

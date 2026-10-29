@@ -1610,6 +1610,35 @@ def ue_legacy_shaders(path, rel, names, out):
         label = re.sub(r"^(\.\./)+", "", os.path.normpath(pk.mount + name))
         ue_inline_shaders(d, f'/{rel}#{label}', out)
 
+UE_IO = 'UE4 IoStore'
+def ue_io_jobs(files, parts=64):
+    """Unreal Engine 4.25 to 4.27 IoStore containers (.utoc / .ucas, TOC version below 4; Kimetsu no Yaiba - The Hinokami Chronicles 1: global.utoc, pakchunk0-Switch.utoc 97,037 chunks and
+    pakchunk1-Switch.utoc, Zlib blocks, not encrypted): the cooked packages (ExportBundleData chunks) hold each material's shader map inline, every shader an LZ4 block (ue_inline_shaders). One job per
+    run of chunks of about equal raw size. → ([(utoc path, rel, (UE_IO, chunk indices)), …], the paths taken: the .utoc and every .ucas partition, which the plain file scan must not read as blobs)"""
+    tocs, taken = [], set()
+    for p, r in files:
+        if not p.endswith('.utoc'): continue
+        try: t = uepak.Toc(p)
+        except (OSError, ValueError, struct.error): continue
+        if t.version >= 4 or t.encrypted: continue   # UE5 numbering and libraries: uepak.io_archive / inline_archives; an encrypted container needs the pak key
+        tocs.append((p, r, t)); taken |= {p, p[:-5] + '.ucas'} | {f'{p[:-5]}_s{k}.ucas' for k in range(1, 16)}
+    total = sum(t.ranges[i][1] for _, _, t in tocs for i in t.export_bundles())
+    jobs = []
+    for p, r, t in tocs:
+        cur, size = [], 0
+        for i in t.export_bundles():
+            cur.append(i); size += t.ranges[i][1]
+            if size >= total / parts: jobs.append((p, r, (UE_IO, tuple(cur)))); cur, size = [], 0
+        if cur: jobs.append((p, r, (UE_IO, tuple(cur))))
+    return jobs, taken
+
+_TOCS = {}
+def ue_io_shaders(path, rel, chunks, out):
+    """The chunks of a UE 4 IoStore container (ue_io_jobs), each read whole (Zlib blocks, uepak.Toc.read) and scanned for the inline shaders of its shader maps"""
+    t = _TOCS.get(path) or _TOCS.setdefault(path, uepak.Toc(path))
+    for i in chunks:
+        ue_inline_shaders(t.read(i), f'/{rel}#{t.ids[i].hex()}', out)
+
 ZLIB_HEAD = re.compile(b'\x78[\x01\x5e\x9c\xda]')
 def ue_inline_shaders(d, label, out):
     """Shaders kept inline in cooked Unreal packages (UE 4.18, DRAGON QUEST XI S: each material's shader map in its .uexp, 38 to 87 shaders in the ones looked at, and the engine's global shaders in
@@ -2178,6 +2207,9 @@ def scan_file_in(args):
     if len(args) > 2 and head[:4] == ZIP and args[2][0] == ZIP:   # members of a zip archive (zip_jobs)
         zip_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == UE_IO:   # chunks of a UE 4 IoStore container (ue_io_jobs)
+        ue_io_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == UE_LEGACY:   # files of a legacy Unreal pak (ue_legacy_jobs)
         ue_legacy_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -2336,14 +2368,15 @@ def main():
     pak_jobs, paks = kpka_jobs(files)   # Monster Hunter Rise's PAKs: the newest copy of each path, in ranges of entries
     tr_jobs, trp = trpfs_jobs(files)   # Pokémon Legends: Z-A's Trinity packs (data.trpfs and its index data.trpfd), decoded by the game's own Oodle in the Mac host
     ue_jobs, uep = ue_legacy_jobs(files)   # Unreal paks with inline shaders: DRAGON QUEST XI S's legacy ones (the game's own LZ5 in the Mac host), OCTOPATH TRAVELER II's (Zlib)
+    io_jobs, iop = ue_io_jobs(files)   # UE 4.25 to 4.27 IoStore containers: the shader maps inline in their cooked packages
     bd_jobs, bdts = bdt_jobs(files)   # Dark Souls Remastered's dvdbnd archives: the entries of each .bdt by its .bhd5 index, in ranges
     arc_jobs, arcs = smash_arc_jobs(files)   # Super Smash Bros. Ultimate's data.arc: its current files, in ranges
     pz_jobs, pkzs = pkz_jobs(files)   # Bayonetta 3's PKZ archives, Oodle Kraken decoded by the game's own decoder in the Mac host
     ck_jobs, cpks = cpk_jobs(files)   # Bayonetta 2's CRI CPK archives (CRILAYLA entries)
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs]
+    big += pak_jobs + tr_jobs + ue_jobs + io_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in iop and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
