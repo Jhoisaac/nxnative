@@ -35,6 +35,9 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 # the NPDM declares 16 MB of system resource
 sys_resource	0x1000000
+# the game sets the near=0 depth mode (nvnDeviceSetDepthMode, `depth mode: near=0` in the log): the pipeline bases made before it runs (the NSP script's prebuild, the app's
+# offline archive) take the main0_z vertex entries; without this key they were made for near=-w and no draw found them
+depth_mode	zero
 
 # ---- Shader split ----
 # the decoded shader code archives: the engine's global shaders and the game's material shaders

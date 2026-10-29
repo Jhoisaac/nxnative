@@ -1,0 +1,10 @@
+# The user's save at the story's chapter map (a copy in the NSP folder, saves/story): title (Ver. 1.02), Story, the chapter map, the chapter's cutscene and dialogue, then
+# combat presses in the tutorial fight (HUD from about frame 9000). Frame numbers, not seconds: the host shares the Mac with other jobs
+save	saves/story
+keys	f2400:A~0.3,f4800:A~0.3,f5400:A~0.3,f6000:A~0.3,f6300:A~0.3,f7200:A~0.3,f7680:A~0.3,f8160:A~0.3,f8640:A~0.3,f9300:LRight~1.5,f9400:Y~0.15,f9420:Y~0.15,f9440:Y~0.15,f9460:Y~0.15,f9700:LLeft~1,f9770:LUp~1,f9850:Y~0.15,f9870:Y~0.15,f9890:Y~0.15,f9930:X~0.2
+secs	330
+quick	200
+reach	9500@320
+window	270	50
+shots	190,215
+hang	30
