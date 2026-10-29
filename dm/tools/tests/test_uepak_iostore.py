@@ -151,5 +151,12 @@ class IoStore(unittest.TestCase):
         self.assertEqual(uepak.io_shader_tocs(str(self.romfs)), [])
         self.assertEqual(self.run_job(), ([], 0))
 
+    def test_export_bundles_type_follows_toc_version(self):
+        old, new = chunk_id(4, uepak.IO_EXPORT_BUNDLE_UE4), chunk_id(5, uepak.IO_EXPORT_BUNDLE)
+        for version, want in ((2, [0]), (3, [0]), (8, [1])):
+            with self.subTest(version=version):
+                path = container(self.romfs, f'v{version}.utoc', [(old, b'ue4 bundle'), (new, b'ue5 bundle')], version=version)
+                self.assertEqual(uepak.Toc(str(path)).export_bundles(), want)
+
 
 if __name__ == '__main__': unittest.main()

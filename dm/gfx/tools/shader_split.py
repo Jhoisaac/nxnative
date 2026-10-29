@@ -667,6 +667,76 @@ def pg_sized_shader(d, label):
     if why: red(f'{label} ({st}): {why}')
     return [(f'{label}#PGSO', st, ctl, code)]
 
+IGA, IGZ = b'IGA\x1a', b'\x01ZGI'
+def iga_chunk(d, pos, left, packed=None):
+    """one chunk of an IGA file: u32 compressed length n (at most 0x8100), then a raw LZMA1 stream (props byte, u32 dictionary size 0x8000, data) that decodes to at most left <= 0x8000 bytes; the
+    decoder is given 59 bytes past n, which are the next chunk's header or padding. A stored chunk is the 0x8000 bytes as they are. packed: whether the chunk is compressed (the table says), None to
+    decide by the header. -> (data, bytes the chunk takes), or None when there is no such chunk or it does not decode"""
+    import lzma
+    if not 0 <= pos <= len(d) - 9: return None
+    n, dic = struct.unpack_from('<I', d, pos)[0], struct.unpack_from('<I', d, pos + 5)[0]
+    props = d[pos + 4]
+    if packed is None: packed = props < 225 and 9 <= n <= 0x8100 and dic == 0x8000
+    if not packed: return (d[pos:pos + left], 0x8000) if pos + left <= len(d) else None
+    if props >= 225 or not 9 <= n <= 0x8100 or dic != 0x8000: return None
+    try:
+        lz = lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[{'id': lzma.FILTER_LZMA1, 'dict_size': dic, 'lc': props % 9, 'lp': props // 9 % 5, 'pb': props // 45}])
+        return lz.decompress(d[pos + 9:pos + 4 + n + 64], max_length=left), n + 4
+    except lzma.LZMAError: return None
+
+def iga_file(d, off, size, al, run, keep):
+    """the chunks of one IGA file (iga_members): from off, each next one at the end of the previous rounded up to al, or at the starts of the table entries in run (bit 15: compressed). → (data, whole),
+    None when a chunk is missing or the length is not size; keep(first chunk) false: (the first chunk, False)"""
+    out, pos = b'', off
+    for c in range(-(-size // 0x8000)):
+        if run: pos = off + (run[c] & 0x7fff) * al
+        r = iga_chunk(d, pos, min(0x8000, size - len(out)), bool(run[c] & 0x8000) if run else None)
+        if not r: return None
+        out += r[0]; pos = -(-(pos + r[1]) // al) * al
+        if c == 0 and keep and not keep(out): return out, False
+    return (out, True) if len(out) == size else None
+
+def iga_members(d, label, keep=None):
+    """Alchemy archive ('IGA\\x1a'; Crash Team Racing Nitro-Fueled keeps its 401 '.pak' files, 9.6 GB, in this form, and archives/shaders_nx.pak holds its precompiled GLSLC outputs): u32 version (0xd),
+    u32 header length, u32 file count, u32 alignment (0x800), u32 checksum, then +0x38 u32 hashes[count], one 16-byte record per file {u32 data offset, u32 a, u32 length, u32 tag = index | 0x20000000,
+    or 0xffffffff for a file stored as it is} and a u16 table up to the first file (the header length is short of the records in the small archives, 0x108 for 11 files, so it is not used).
+    A file is a series of chunks (iga_chunk), each decoding to 0x8000 bytes (the last fewer), compressed or stored as they are (a115_skull_rock.pak's larger files, basekart.pak's Havok data), each
+    starting at a multiple of the alignment. The u16 table holds a chunk's start in alignment units from the file's data offset, bit 15 set when it is compressed; a file's run is its chunk count of
+    entries and one for the end (set in shaders_nx.pak, where a run's end entry is the only one without the bit).
+    Which chunks a file has: each starts where the previous one ended, rounded up to the alignment, except in two of the 87 files of shaders_nx.pak (55 and 64) and one of juicedomain_scrapbook.pak
+    (file 19, stored last chunk), whose chunks have gaps: their starts are the table run at the tag's low 29 bits. UNRESOLVED: that is a fit, not the format's own rule (25 files of shaders_nx.pak have a
+    run there that starts at 0 and gives the sequential chunks too; in the others the tag lands inside another file's run or outside the table; record field a is not the table index), so a run is used
+    first when it starts at 0 and rises, and the sequential chunks are the rule when there is none or it does not decode.
+    keep: called with a file's first chunk, the rest is decoded only when it returns true. -> (file number, data) of each file kept"""
+    ver, _, n, al = field(d, '<4I', 4, label)
+    if ver != 0xd or al < 4 or al & al - 1: red(f'{label}: IGA version {ver:#x}, alignment {al:#x}: only version 0xd is known')
+    rec, tab = 0x38 + 4 * n, 0x38 + 20 * n
+    recs = [field(d, '<4I', rec + 16 * i, label) for i in range(n)]
+    end = min([r[0] for r in recs] + [len(d)])
+    if tab > end: red(f'{label}: IGA header of {n} files, the first file at {end:#x}')
+    t = struct.unpack_from(f'<{(end - tab) // 2}H', d, tab)
+    for i, (off, _, size, tag) in enumerate(recs):
+        where, k = f'{label}#{i}', -(-size // 0x8000)
+        if tag == 0xffffffff:
+            data = span(d, off, size, where)
+            if not keep or keep(data[:0x8000]): yield i, data
+            continue
+        j = tag & 0x1fffffff
+        run = t[j:j + k] if k and j + k < len(t) and not t[j] & 0x7fff else None   # k starts and an end entry after them, the first at the file's offset
+        if run and any(x & 0x7fff >= y & 0x7fff for x, y in zip(t[j:j + k], t[j + 1:j + k + 1])): run = None   # the starts rise (not the table's zero fill)
+        r = run and iga_file(d, off, size, al, run, keep) or iga_file(d, off, size, al, None, keep)
+        if not r: red(f'{where}: its {k} chunks from {off:#x} do not decode to {size:#x} bytes')
+        elif r[1]: yield i, r[0]
+
+def iga_keep(head):   # an effect member (IGZ) whose first chunk names its shader source ('data/shared/shaders/<name>.asl'); textures, models and the shader index ('shaders/<name>.igz') hold no GLSLC output
+    return head[:4] == IGZ and b'.asl\0' in head
+
+def iga_shaders(d, label):
+    """the GLSLC outputs (glslc_shaders) in the effect members of an IGA archive (iga_members); the game never compiles them, it hands them to the driver as they are"""
+    out = []
+    for i, m in iga_members(d, label, iga_keep): out += glslc_shaders(m, f'{label}#{i}', need=False)
+    return out
+
 MTARC, MTSPK = b'ARC\0', b'SPK\0'
 def mtarc_members(d, label):
     """Capcom's MT Framework archive (The Great Ace Attorney Chronicles: 447 '.arc' files under nativeNXx64): 'ARC\\0', u16 version 7, u16 entry count, then one 0x90-byte entry per file
@@ -705,6 +775,47 @@ def mtspk_shaders(d, label):
 def mtarc_shaders(d, label, out):
     for path, m in mtarc_members(d, label):
         if m[:4] == MTSPK: out.extend(mtspk_shaders(m, f'{label}#{path}'))
+
+BND2 = b'bnd2'
+def bnd2_shaders(d, label):
+    """Criterion's resource bundle ('bnd2', version 2; Burnout Paradise Remastered keeps all of its 242 shaders in SHADERS.BNDL, beside main's 138 GLSLC outputs). Header (u32 each): magic,
+    version, platform, +0xC the debug data's offset (XML, one <Resource id="…" type="…" name="…"/> per resource), +0x10 the resource count, +0x14 the entry table's offset, +0x18..+0x20 the
+    start of each of the three data blocks, +0x24 flags. Each 0x40-byte entry: u32 resource ID (+0), per block the uncompressed size (+0x10.., the low 28 bits; the alignment above), the stored
+    size (+0x1C..) and the offset in that block (+0x28..), +0x34 the import table's offset in block 0, +0x38 the type ID, +0x3C the import count. Each block of a resource is a zlib stream.
+    A PixelShader or VertexShader resource's block 1 is one whole GLSLC output (glslc_shaders); its block 0 is a small header. A Shader resource (the technique) imports {u64 resource ID,
+    u32 pointer offset, u32 0} its passes' shaders in vertex, pixel order, which gives the pairs the engine draws (121 in Burnout). The compressed bytes never show a shader magic, so the
+    generic prefilter dropped the file. Only bundles whose debug data names a shader type are decoded (one of Burnout's 2,200 bundles); a bundle without debug data is not read.
+    → (found, {(vertex key, pixel key)})"""
+    dbg, n, tab = struct.unpack_from('<3I', d, 0xC)
+    starts = struct.unpack_from('<3I', d, 0x18)
+    if not 0x28 <= dbg <= tab or tab + 0x40 * n > len(d) or any(s > len(d) for s in starts): red(f'{label}: bnd2 header out of bounds')
+    types = {int(i, 16): t.decode() for i, t in re.findall(rb'<Resource id="([0-9a-fA-F]+)" type="(\w+)"', d[dbg:tab])}
+
+    def block(w, b):
+        usz, csz, off = w[4 + b] & 0xfffffff, w[7 + b], w[10 + b]
+        if not csz: return b''
+        z = zlib.decompressobj(); a = starts[b] + off
+        data = z.decompress(d[a:a + csz], usz)
+        if len(data) != usz or not z.eof: red(f'{label}: resource block {b} of {w[0]:08x} gives {len(data):#x} bytes, the entry says {usz:#x}')
+        return data
+    found, by_id, techniques = [], {}, []
+    for i in range(n):
+        w = struct.unpack_from('<16I', d, tab + 0x40 * i)
+        t = types.get(w[0])
+        if t in ('PixelShader', 'VertexShader'):
+            got = glslc_shaders(block(w, 1), f'{label}#r{w[0]:08x}', need=False)
+            if len(got) != 1 or got[0][1] != ('ps' if t == 'PixelShader' else 'vs'): red(f'{label}: {t} {w[0]:08x} holds {len(got)} GLSLC outputs, not one of its stage')
+            found += got; by_id[w[0]] = got[0]
+        elif t == 'Shader' and w[15]: techniques.append(w)
+    pairs = set()
+    for w in techniques:
+        b0 = block(w, 0)
+        ids = [struct.unpack_from('<Q', b0, w[13] + 16 * k)[0] for k in range(w[15])]
+        refs = [by_id[r] for r in ids if r in by_id]
+        for v, p in zip(refs[::2], refs[1::2]):
+            if v[1] != 'vs' or p[1] != 'ps': red(f'{label}: Shader {w[0]:08x} imports {v[1]}, {p[1]}, not a vertex shader and then a pixel shader')
+            pairs.add((skey(v[2], v[3]), skey(p[2], p[3])))
+    return found, pairs
 
 SCNE, ZSTD_MAGIC = b'SCNE', bytes.fromhex('28b52ffd')
 LZ4_FRAME_MAGIC = bytes.fromhex('04224d18')   # the frame of HAL's other .cmp container (the ubin/ map data)
@@ -1610,6 +1721,35 @@ def ue_legacy_shaders(path, rel, names, out):
         label = re.sub(r"^(\.\./)+", "", os.path.normpath(pk.mount + name))
         ue_inline_shaders(d, f'/{rel}#{label}', out)
 
+UE_IO = 'UE4 IoStore'
+def ue_io_jobs(files, parts=64):
+    """Unreal Engine 4.25 to 4.27 IoStore containers (.utoc / .ucas, TOC version below 4; Kimetsu no Yaiba - The Hinokami Chronicles 1: global.utoc, pakchunk0-Switch.utoc 97,037 chunks and
+    pakchunk1-Switch.utoc, Zlib blocks, not encrypted): the cooked packages (ExportBundleData chunks) hold each material's shader map inline, every shader an LZ4 block (ue_inline_shaders). One job per
+    run of chunks of about equal raw size. → ([(utoc path, rel, (UE_IO, chunk indices)), …], the paths taken: the .utoc and every .ucas partition, which the plain file scan must not read as blobs)"""
+    tocs, taken = [], set()
+    for p, r in files:
+        if not p.endswith('.utoc'): continue
+        try: t = uepak.Toc(p)
+        except (OSError, ValueError, struct.error): continue
+        if t.version >= 4 or t.encrypted: continue   # UE5 numbering and libraries: uepak.io_archive / inline_archives; an encrypted container needs the pak key
+        tocs.append((p, r, t)); taken |= {p, p[:-5] + '.ucas'} | {f'{p[:-5]}_s{k}.ucas' for k in range(1, 16)}
+    total = sum(t.ranges[i][1] for _, _, t in tocs for i in t.export_bundles())
+    jobs = []
+    for p, r, t in tocs:
+        cur, size = [], 0
+        for i in t.export_bundles():
+            cur.append(i); size += t.ranges[i][1]
+            if size >= total / parts: jobs.append((p, r, (UE_IO, tuple(cur)))); cur, size = [], 0
+        if cur: jobs.append((p, r, (UE_IO, tuple(cur))))
+    return jobs, taken
+
+_TOCS = {}
+def ue_io_shaders(path, rel, chunks, out):
+    """The chunks of a UE 4 IoStore container (ue_io_jobs), each read whole (Zlib blocks, uepak.Toc.read) and scanned for the inline shaders of its shader maps"""
+    t = _TOCS.get(path) or _TOCS.setdefault(path, uepak.Toc(path))
+    for i in chunks:
+        ue_inline_shaders(t.read(i), f'/{rel}#{t.ids[i].hex()}', out)
+
 ZLIB_HEAD = re.compile(b'\x78[\x01\x5e\x9c\xda]')
 def ue_inline_shaders(d, label, out):
     """Shaders kept inline in cooked Unreal packages (UE 4.18, DRAGON QUEST XI S: each material's shader map in its .uexp, 38 to 87 shaders in the ones looked at, and the engine's global shaders in
@@ -2178,6 +2318,9 @@ def scan_file_in(args):
     if len(args) > 2 and head[:4] == ZIP and args[2][0] == ZIP:   # members of a zip archive (zip_jobs)
         zip_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == UE_IO:   # chunks of a UE 4 IoStore container (ue_io_jobs)
+        ue_io_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == UE_LEGACY:   # files of a legacy Unreal pak (ue_legacy_jobs)
         ue_legacy_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -2211,12 +2354,23 @@ def scan_file_in(args):
     if head[:4] == MTARC:   # an MT Framework archive (mtarc_members): its shader package
         mtarc_shaders(open(path, 'rb').read(), '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == IGA:   # an Alchemy archive (iga_members): the GLSLC outputs in its effect files
+        found += iga_shaders(open(path, 'rb').read(), '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == SCNE:   # a Bezel Engine archive (bea_members): each entry scanned as a file of its own (the shaders are BNSH in its .bfsha entries)
         for nm, m in bea_members(open(path, 'rb').read(), '/' + rel): scan_blob(m, f'/{rel}/{nm}', found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:8] == GFPAK:   # a Game Freak archive (gfpak_members): each entry scanned as a file of its own (the shaders are BNSH entries)
         for nm, m in gfpak_members(open(path, 'rb').read(), '/' + rel): scan_blob(m, f'/{rel}{nm}', found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == BND2:   # a Criterion bundle (bnd2_shaders): its shaders are in zlib streams
+        with open(path, 'rb') as f: d = f.read(0x28)
+        dbg, tab = struct.unpack_from('<I', d, 0xC)[0], struct.unpack_from('<I', d, 0x14)[0]
+        with open(path, 'rb') as f: f.seek(dbg); xml = f.read(max(0, tab - dbg))
+        if b'type="PixelShader"' not in xml and b'type="VertexShader"' not in xml: return rel, {}, set(), {}
+        with open(path, 'rb') as f: got, pairs = bnd2_shaders(f.read(), '/' + rel)
+        found += got
+        return rel, uniq_keys(found), var_pairs(found) | pairs, trees
     if head[:4] == b'SRYK':
         import vbf
         with open(path, 'rb') as f:
@@ -2312,10 +2466,10 @@ def main():
         found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)
         found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c for _, _, c, _ in found})
         # GLSLC outputs the game compiles at run time, captured on the Mac (hle_glslc.c): <version dir>/glslc_capture, or DM_GLSLC_CAPTURE. A game needs them when main holds GLSL sources and
-        # calls glslcCompile in a module it loads (Fire Emblem: Three Houses; profile_guess.py shader_sources). Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it
+        # calls glslcCompile in a module it loads (Fire Emblem: Three Houses; profile_guess.py shader_sources); the marker file compiled_none (capture_glslc) says a boot found that the game compiles none (Crash Team Racing Nitro-Fueled). Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it
         cap = os.environ.get('DM_GLSLC_CAPTURE') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'glslc_capture')
         names = sorted(f for f in os.listdir(cap) if f.endswith('.glslc')) if os.path.isdir(cap) else []
-        if not names and glsl_sources(img) and 'glslcCompile' in main_imports(img) and glslc_module(os.path.dirname(os.path.abspath(mainnso))):
+        if not names and not os.path.exists(os.path.join(cap, 'compiled_none')) and glsl_sources(img) and 'glslcCompile' in main_imports(img) and glslc_module(os.path.dirname(os.path.abspath(mainnso))):
             print(f'[RED] main holds GLSL sources and imports glslcCompile, but there are no captured GLSLC outputs in {cap}: the shaders the game compiles at run time will have no translation', flush=True)
         for nm in names: found += glslc_shaders(open(os.path.join(cap, nm), 'rb').read(), f'/glslc_capture/{nm}')
         # Unreal Engine shader code archives decoded on the Mac (uepak.py): <version dir>/ue_shaders, or DM_UE_SHADERS; needed when the RomFS has Unreal paks
@@ -2336,14 +2490,15 @@ def main():
     pak_jobs, paks = kpka_jobs(files)   # Monster Hunter Rise's PAKs: the newest copy of each path, in ranges of entries
     tr_jobs, trp = trpfs_jobs(files)   # Pokémon Legends: Z-A's Trinity packs (data.trpfs and its index data.trpfd), decoded by the game's own Oodle in the Mac host
     ue_jobs, uep = ue_legacy_jobs(files)   # Unreal paks with inline shaders: DRAGON QUEST XI S's legacy ones (the game's own LZ5 in the Mac host), OCTOPATH TRAVELER II's (Zlib)
+    io_jobs, iop = ue_io_jobs(files)   # UE 4.25 to 4.27 IoStore containers: the shader maps inline in their cooked packages
     bd_jobs, bdts = bdt_jobs(files)   # Dark Souls Remastered's dvdbnd archives: the entries of each .bdt by its .bhd5 index, in ranges
     arc_jobs, arcs = smash_arc_jobs(files)   # Super Smash Bros. Ultimate's data.arc: its current files, in ranges
     pz_jobs, pkzs = pkz_jobs(files)   # Bayonetta 3's PKZ archives, Oodle Kraken decoded by the game's own decoder in the Mac host
     ck_jobs, cpks = cpk_jobs(files)   # Bayonetta 2's CRI CPK archives (CRILAYLA entries)
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs]
+    big += pak_jobs + tr_jobs + ue_jobs + io_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in iop and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
