@@ -2566,7 +2566,20 @@ int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, si
     if (t->magic != MAGIC('T', 'E', 'X', 0)) return -1;
     if (tw) *tw = (int)t->d.width;
     if (th) *th = (int)t->d.height;
-    if (src) { NVNcopyRegion r = {0, 0, 0, w, h, 1}; write_texels(t, NULL, &r, src, row, 0); }
+    if (src) {
+        NVNcopyRegion r = {0, 0, 0, w, h, 1};
+        // src holds RGBA bytes (R first). A BGR-ordered format (BGRX8 / BGRA8, sRGB too: DRAGON BALL Z: KAKAROT's BGRA8 movie texture) keeps B first in memory, so the first and third byte of each
+        // texel trade places; written as they came, red and blue swapped on sampling (peach skin blue-white)
+        uint8_t *sw = NULL;
+        if (t->d.format >= NVN_FORMAT_BGRX8 && t->d.format <= NVN_FORMAT_BGRA8_SRGB && w > 0 && h > 0 && (sw = malloc((size_t)w * h * 4))) {
+            size_t rs = row ? row : (size_t)w * 4;
+            for (int y = 0; y < h; y++) {
+                const uint8_t *s = (const uint8_t *)src + (size_t)y * rs; uint8_t *o = sw + (size_t)y * w * 4;
+                for (int x = 0; x < w; x++) { o[4 * x] = s[4 * x + 2]; o[4 * x + 1] = s[4 * x + 1]; o[4 * x + 2] = s[4 * x]; o[4 * x + 3] = s[4 * x + 3]; }
+            }
+            write_texels(t, NULL, &r, sw, (size_t)w * 4, 0); free(sw);
+        } else write_texels(t, NULL, &r, src, row, 0);
+    }
     return (int)t->d.format;
 }
 // work the host finished on the CPU: the sync object counts as signalled at once (fence 0 is always complete)
