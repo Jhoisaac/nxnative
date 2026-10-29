@@ -64,7 +64,10 @@ int main(void) {
         CHECK(read_fs("rom:/data/a", got, sizeof got) && !strcmp(got, "hello"), "reads a file"); CHECK(read_fs("rom:/data/../data/c", got, sizeof got) && !strcmp(got, "xy"), "reads the next file, through ..");
         uint64_t h; size_t n = 0; int64_t sz = 0; char b[16] = {0};
         CHECK(h_fs_OpenFile(&h, "rom:/data/a", MODE_READ) == RES_OK && h_fs_ReadFile(&n, h, 3, b, 10) == RES_OK && n == 2 && !memcmp(b, "lo", 2), "a read stops at the end of the file (got %zu)", n);
-        CHECK(h_fs_GetFileSize(&sz, h) == RES_OK && sz == 5 && h_fs_GetFileOpenMode(h) == MODE_READ, "size 5, open for reading"); h_fs_CloseFile(h);
+        CHECK(h_fs_GetFileSize(&sz, h) == RES_OK && sz == 5 && h_fs_GetFileOpenMode(h) == MODE_READ, "size 5, open for reading");
+        memset(b, 0, sizeof b); char opt[8] = {0};   // the exact-read overloads: a whole read succeeds, one past the end fails (My Hero One's Justice 2 reads its DLC.json with options)
+        CHECK(h_fs_ReadFileExactOpt(h, 1, b, 4, opt) == RES_OK && !memcmp(b, "ello", 4) && h_fs_ReadFileExactOpt(h, 3, b, 4, opt) != RES_OK && h_fs_ReadFileExact(h, 0, b, 5) == RES_OK, "complete reads with and without options; a short one fails");
+        h_fs_CloseFile(h);
         // entry 4: its index has low bits set, which Metroid Prime 4's file device masks off (handle & ~7) as it may of a Horizon pointer
         CHECK(h_fs_OpenFile(&h, "rom:/data/c", MODE_READ) == RES_OK && !(h & 15) && h_fs_ReadFile(&n, h & ~7ull, 0, b, 10) == RES_OK && n == 2 && !memcmp(b, "xy", 2), "entry 4 still reads after its handle's low bits are masked off (%#llx)", (unsigned long long)h);
         CHECK(h_fs_GetFileSize(&sz, h & ~7ull) == RES_OK && sz == 2, "and is 2 bytes"); h_fs_CloseFile(h & ~7ull);
