@@ -1750,6 +1750,198 @@ def ue_io_shaders(path, rel, chunks, out):
     for i in chunks:
         ue_inline_shaders(t.read(i), f'/{rel}#{t.ids[i].hex()}', out)
 
+UE5_MAPS, UE5_GLOBAL, UE5_STATS = 'UE5 shader maps', 'UE5 global shader maps', 'ue5 stats'
+UE5_MAP_PARTS = 64
+def ue5_map_jobs(files, enabled, parts=UE5_MAP_PARTS):
+    """The vertex / pixel pairs of Unreal Engine 5's shader maps (uepak.ue5_shader_maps), for a game whose shaders are inline in its cooked packages (enabled: the NSP script's decoded archives hold
+    ShaderArchive-Packages, uepak.inline_archives; every other game takes no job here and prints nothing). IoStore containers of TOC version 4 and later, one job per run of ExportBundleData chunks of about
+    equal raw size (like ue_io_jobs), and one job for the GlobalShaderCache-*.bin files of the paks. An encrypted container needs the pak key, which the split does not have: a red line and no pairs from it.
+    → ([(path, rel, (UE5_MAPS, chunk indices) or (UE5_GLOBAL, names)), …], the paths taken: the .utoc and every .ucas partition, which the plain file scan must not read as blobs)"""
+    if not enabled: return [], set()
+    tocs, taken = [], set()
+    for p, r in files:
+        if not p.endswith('.utoc'): continue
+        try: t = uepak.Toc(p)
+        except (OSError, ValueError, struct.error): continue
+        if t.version < 4 or not t.export_bundles(): continue   # UE 4.25 to 4.27: ue_io_jobs
+        if t.encrypted: print(f'[RED] /{r}: the container is encrypted; its shader maps give no pairs', flush=True); continue
+        tocs.append((p, r, t)); taken |= {p, p[:-5] + '.ucas'} | {f'{p[:-5]}_s{k}.ucas' for k in range(1, 16)}
+    total = sum(t.ranges[i][1] for _, _, t in tocs for i in t.export_bundles())
+    jobs = []
+    for p, r, t in tocs:
+        cur, size = [], 0
+        for i in t.export_bundles():
+            cur.append(i); size += t.ranges[i][1]
+            if size >= total / parts: jobs.append((p, r, (UE5_MAPS, tuple(cur)))); cur, size = [], 0
+        if cur: jobs.append((p, r, (UE5_MAPS, tuple(cur))))
+    view = {}
+    for p, r in sorted((x for x in files if x[0].endswith('.pak')), key=lambda x: (x[1].endswith('_P.pak'), x[1])):   # patch paks last, so they replace
+        try: pk = uepak.Pak(p)
+        except (OSError, ValueError, struct.error): continue   # no Unreal pak (or one whose index is encrypted: the global shaders of such a game are not read)
+        view.update({(os.path.dirname(p), os.path.basename(n)): (p, r, n) for n in pk.files if re.fullmatch(r'GlobalShaderCache-.+\.bin', os.path.basename(n))})
+    jobs += [(p, r, (UE5_GLOBAL, (n,))) for p, r, n in sorted(view.values(), key=lambda v: (v[1], v[2]))]
+    return jobs, taken
+
+UE_PASS_FAMILIES = [   # (type name pattern, family): ordered, the first match wins. UE has no table of "this vertex shader goes with that pixel shader": the pass processors (GetBasePassShaders<LightMapPolicy>,
+    # GetShadowDepthPassShaders, ...) instantiate both stages with the same template arguments, so the only trace in the data is the TYPE NAME (TBasePassVSFNoLightMapPolicy / TBasePassPSFNoLightMapPolicy[Skylight]).
+    # A vertex and a pixel shader of one mesh shader map (one vertex factory) of the same family are a pair. Checked on Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2: all 1,614 recorded material pairs
+    (re.compile(r'TBasePass(VS|PS)(.+?)(Skylight)?'), lambda m: ('basepass', m[2])),
+    (re.compile(r'TShadowDepth(VS|PS)(Vertex|Pixel)ShadowDepth_(\w+?)(PositionOnly)?'), lambda m: ('shadow', 'OutputDepth/NonPerspectiveCorrect' if m[3] in ('OutputDepth', 'NonPerspectiveCorrect', 'OnePassPointLight') else m[3])),   # that game has no OnePassPointLight vertex shader: its OutputDepth one draws the one pass point light shadows
+    (re.compile(r'TSlateMaterialShader(VS|PS)(.+)'), lambda m: ('slate',)),
+    (re.compile(r'TDepthOnlyVS<.*>|FDepthOnlyPS'), lambda m: ('depthonly',)),
+    (re.compile(r'F(\w+?)(Emissive|AmbientOcclusion)?(VS|PS)[01]*'), lambda m: ('f', m[1])),   # FPostProcessMaterialVS/PS, FDistortionMeshVS/PS, FMeshDecalsVS/PS, FDeferredDecalVS/PS, FCloudRenderViewPS000 (permutation bits), ...
+    (re.compile(r'T(\w+?)(VS|PS)<(.*)>'), lambda m: ('t', m[1], m[3])),   # TVoxelizeVolumeVS<VMode_Object_Box> with TVoxelizeVolumePS<VMode_Object_Box>
+]
+UE_FULLSCREEN = ('FScreenVertexShaderVS', 'FScreenPassVS', 'FExrSwizzleVS', 'FScreenVS', 'FWriteToSliceVS')   # the full-screen triangle vertex shaders the post process passes share
+
+def ue_pass_family(name):
+    """A shader type name's pass family (UE_PASS_FAMILIES), or None"""
+    for rx, fam in UE_PASS_FAMILIES:
+        m = rx.fullmatch(name)
+        if m: return fam(m)
+    return None
+
+def ue_stem_words(stem):
+    return re.findall(r'[A-Z][a-z0-9]*|[A-Z]+(?![a-z])', re.sub(r'^[FT](?=[A-Z])', '', stem))
+
+def ue_related(vstem, pstem):
+    """A global vertex shader's name stem and a pixel shader's: one is a prefix or a suffix of the other in whole words (FHeightFog / FExponentialHeightFog), or they share two leading words
+    (ShadowProjectionNoTransform / ShadowProjection)"""
+    a, b = ue_stem_words(vstem), ue_stem_words(pstem)
+    if not a or not b: return False
+    return a[:len(b)] == b or b[:len(a)] == a or a[-len(b):] == b or b[-len(a):] == a or (len(a) > 1 and len(b) > 1 and a[:2] == b[:2])
+
+def ue_map_pairs(mp, key, skip=(), unmatched=None, orphans=None, pipe_pairs=None):
+    """The (vertex key, pixel key) pairs of one UE5 material shader map (uepak.ue5_shader_maps; key(entry index) → the shader's key or None). Rule A: in each mesh shader map (one vertex factory) a vertex
+    shader pairs with every pixel shader of its pass family (ue_pass_family); a shader type with no family is left out (its name goes to `unmatched`). Pipelines (FShaderPipeline: drawn only as a unit,
+    each stage its own shader object): the vertex and pixel stage of each, except the pipeline types in `skip` (the profile's ue_pair_skip_pipelines); pipe_pairs[pipeline type] gets all of them. A pixel
+    shader whose family has no vertex shader in its mesh shader map is a candidate for the global vertex shader of that family (orphans: {(family, pixel key)}, ue_orphan_pairs). → (rule A pairs, pipeline pairs)"""
+    fam, a, pl = {}, set(), set()
+    for sm in mp['submaps']:
+        vs, ps = collections.defaultdict(set), collections.defaultdict(set)
+        for th, perm, fr, ri in sm['shaders']:
+            if fr not in (0, 3): continue
+            name = mp['types'][th]
+            if name not in fam: fam[name] = ue_pass_family(name)
+            if fam[name] is None:
+                if unmatched is not None: unmatched.add(name)
+                continue
+            k = key(ri)
+            if k: (vs if fr == 0 else ps)[fam[name]].add(k)
+        for f, pks in ps.items():
+            for v in vs.get(f, ()):
+                for pk in pks: a.add((v, pk))
+            if f not in vs and orphans is not None: orphans.update((f, pk) for pk in pks)
+        for th, st in sm['pipes']:
+            if 0 in st and 3 in st:
+                v, pk = key(st[0]), key(st[3])
+                if v and pk:
+                    if pipe_pairs is not None: pipe_pairs[th].add((v, pk))
+                    if th not in skip: pl.add((v, pk))
+    return a, pl
+
+def ue_global_pairs(maps, key, unmatched=None):
+    """The pairs of the engine's global shader maps (uepak.ue5_global_maps): global shaders have no pass. A pixel shader F<Stem>PS<Suffix> pairs with the vertex shader F<Stem>VS (G1: the exact stem, else a
+    related one, ue_related), and every global pixel shader with the full-screen vertex shaders (G2: FUpscalePS is drawn with FScreenPassVS, not FUpscaleVS). → (pairs, {family: vertex keys}, full-screen
+    vertex keys); key(map, entry index) → the shader's key or None. ue_orphan_pairs pairs a material pixel shader that has no vertex shader of its family with these (G3, G4)"""
+    gvs, gps = [], []
+    for mp in maps:
+        for sm in mp['submaps']:
+            for th, perm, fr, ri in sm['shaders']:
+                k = key(mp, ri) if fr in (0, 3) else None
+                if k: (gvs if fr == 0 else gps).append((mp['types'][th], k))
+    by_stem, by_fam, fs = collections.defaultdict(set), collections.defaultdict(set), set()
+    for n, k in gvs:
+        f = ue_pass_family(n)
+        if f: by_fam[f].add(k)
+        m = re.fullmatch(r'(\w+?)VS', n)
+        if m: by_stem[m[1]].add(k)
+        if n in UE_FULLSCREEN: fs.add(k)
+    out = set()
+    for n, k in gps:
+        m = re.fullmatch(r'(\w+?)PS(\w*)', n)
+        vk = set(by_stem.get(m[1], ())) if m else set()
+        if m and not vk:
+            for vst, ks in by_stem.items():
+                if ue_related(vst, m[1]): vk |= ks
+        out |= {(v, k) for v in vk | fs}
+        if not (vk or fs) and unmatched is not None: unmatched.add(n)
+    return out, by_fam, fs
+
+def ue_orphan_pairs(orphans, by_fam, fs):
+    """A material pixel shader whose family has no vertex shader in its own mesh shader map takes the global vertex shaders of that family (FDeferredDecalVS, ...), else the full-screen ones"""
+    return {(v, pk) for f, pk in orphans for v in (by_fam.get(f) or fs)}
+
+class UE5Stats:
+    """What one UE5 job (ue5_map_shaders) returns for main() to merge (ue5_summary): counters, the unknown layouts met {key: where}, the shader types with no family, the material pixel shaders
+    waiting for a global vertex shader, the global vertex shaders by family and the full-screen ones, the pairs by rule, every pipeline type's pairs and the types left out"""
+    def __init__(self):
+        self.count, self.layouts, self.unmatched, self.orphans = collections.Counter(), {}, set(), set()
+        self.by_fam, self.fs, self.rule_a, self.pipes, self.glob = collections.defaultdict(set), set(), set(), set(), set()
+        self.pipe_types, self.skipped = collections.defaultdict(set), set()
+
+_UE5_KEYS = {}   # engine shader hash → key (None: not a shader record of its frequency, or one check() refuses): many materials share shaders, each is decoded once per worker
+def ue5_key(mp, i):
+    h = mp['hashes'][i]
+    if h not in _UE5_KEYS:
+        k, s = None, uepak.ue5_entry(mp, i, oodle)
+        rec = uepak.lslg(s) if s else None
+        if rec and UE_TAG.get(rec[0]) and not check('', UE_TAG[rec[0]], rec[1], rec[2]): k = skey(rec[1], rec[2])
+        _UE5_KEYS[h] = k
+    return _UE5_KEYS[h]
+
+def ue5_map_shaders(path, rel, spec):
+    """A job of ue5_map_jobs: the shader maps of a run of chunks (UE5_MAPS) or of a GlobalShaderCache file (UE5_GLOBAL), each map's shaders decoded with the game's own decoder (oodle) and keyed as ue_shaders
+    keys them. → (pairs (vertex key, pixel key, 'prog'), the counters and sets main() merges)"""
+    st = UE5Stats(); c = st.count; skip = {int(x) for x in GAME.words('ue_pair_skip_pipelines', '')}
+    def say(msg): print(f'[RED] {msg}', flush=True)
+    maps = []
+    if spec[0] == UE5_MAPS:
+        t = _TOCS.get(path) or _TOCS.setdefault(path, uepak.Toc(path))
+        for i in spec[1]:
+            label = f'/{rel}#{t.ids[i].hex()}'
+            try: ms = uepak.ue5_shader_maps(t.read(i, oodle), label, say, stats=c, seen=st.layouts)
+            except (struct.error, IndexError, uepak.MapError) as e: say(f'{label}: {type(e).__name__}: {e}; its shader maps give no pairs'); c['unreadable chunk'] += 1; continue
+            if ms: c['chunks'] += 1
+            maps += ms
+    else:
+        pk = _PAKS.get(path) or _PAKS.setdefault(path, uepak.Pak(path))
+        for n in spec[1]: maps += uepak.ue5_global_maps(pk.read(n, decode=oodle), f'/{rel}#{n}', say, stats=c, seen=st.layouts)
+        c['global files'] += len(spec[1])
+    for mp in maps:
+        c['maps'] += 1; c['mesh shader maps'] += len(mp['submaps']) - 1
+        c['shaders'] += sum(len(sm['shaders']) for sm in mp['submaps']); c['pipelines'] += sum(len(sm['pipes']) for sm in mp['submaps'])
+        if spec[0] == UE5_MAPS:
+            a, pl = ue_map_pairs(mp, lambda i, mp=mp: ue5_key(mp, i), skip, st.unmatched, st.orphans, st.pipe_types)
+            st.rule_a |= a; st.pipes |= pl
+    if spec[0] == UE5_GLOBAL:   # all sections together: a pixel shader's vertex shader may be in another section
+        st.glob, st.by_fam, st.fs = ue_global_pairs(maps, ue5_key, st.unmatched)
+    st.skipped = {th for th in st.pipe_types if th in skip}
+    return {(a, b, 'prog') for a, b in st.rule_a | st.pipes | st.glob}, st
+
+def ue5_summary(stats, keys):
+    """The jobs' counters and sets (ue5_map_shaders) merged: → (more pairs: the orphan pairs, pairs naming a key that no archive has, the lines to print: info, then red). One red line per distinct unknown
+    layout, one for the shader types with no pass family"""
+    c, layouts, unmatched, orphans, fs = collections.Counter(), {}, set(), set(), set()
+    by_fam, a, pl, g, ptypes, skipped = collections.defaultdict(set), set(), set(), set(), collections.defaultdict(set), set()
+    for s in stats:
+        c.update(s.count); layouts.update({k: v for k, v in s.layouts.items() if k not in layouts}); unmatched |= s.unmatched; orphans |= s.orphans; fs |= s.fs
+        a |= s.rule_a; pl |= s.pipes; g |= s.glob; skipped |= s.skipped
+        for f, ks in s.by_fam.items(): by_fam[f] |= ks
+        for th, ps in s.pipe_types.items(): ptypes[th] |= ps
+    more = {(v, p, 'prog') for v, p in ue_orphan_pairs(orphans, by_fam, fs)}
+    allp = {(v, p, 'prog') for v, p in a | pl | g} | more
+    missing = {x for x in allp if x[0] not in keys or x[1] not in keys}
+    info, red_ = [], []
+    unread = ', '.join(f'{n} {k}' for k, n in c.items() if k not in ('maps', 'chunks', 'mesh shader maps', 'shaders', 'pipelines', 'global files'))
+    info.append(f'UE5 shader maps: {c["maps"]:,} read ({c["chunks"]:,} chunks, {c["global files"]} global shader cache file(s)), {c["mesh shader maps"]:,} mesh shader maps, {c["shaders"]:,} shaders, {c["pipelines"]:,} pipelines'
+                + (f'; not walked: {unread}' if unread else '') + f'; pairs: passes {len(a):,}, pipelines {len(pl):,}, global {len(g):,}, global for material pixel shaders {len(more):,}'
+                + '; pipeline types ' + ', '.join(f'{th} {len(ps):,}{" (left out: ue_pair_skip_pipelines)" if th in skipped else ""}' for th, ps in sorted(ptypes.items())))
+    for k, label in sorted(layouts.items()): red_.append(uepak.unknown_layout(k, label, {**uepak.UE5_MAP_LAYOUTS, **uepak.UE5_GLOBAL_LAYOUTS}))
+    if unmatched: red_.append(f'[RED] UE5 pass families: no family for {len(unmatched)} shader types (first: {", ".join(sorted(unmatched)[:20])}): their vertex x pixel pairs are left out')
+    if missing: red_.append(f'[RED] UE5 shader maps: {len(missing)} pairs name a shader that is in no archive (first: {sorted(missing)[0][:2]}); they are left out')
+    return more, missing, info, red_
+
 ZLIB_HEAD = re.compile(b'\x78[\x01\x5e\x9c\xda]')
 def ue_inline_shaders(d, label, out):
     """Shaders kept inline in cooked Unreal packages (UE 4.18, DRAGON QUEST XI S: each material's shader map in its .uexp, 38 to 87 shaders in the ones looked at, and the engine's global shaders in
@@ -2321,6 +2513,9 @@ def scan_file_in(args):
     if len(args) > 2 and args[2][0] == UE_IO:   # chunks of a UE 4 IoStore container (ue_io_jobs)
         ue_io_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] in (UE5_MAPS, UE5_GLOBAL):   # shader maps of UE 5 cooked packages and the global shader cache (ue5_map_jobs): pairs only, no shader of their own
+        pairs, trees[UE5_STATS] = ue5_map_shaders(path, rel, args[2])
+        return rel, {}, pairs, trees
     if len(args) > 2 and args[2][0] == UE_LEGACY:   # files of a legacy Unreal pak (ue_legacy_jobs)
         ue_legacy_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -2451,7 +2646,7 @@ def main():
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
     romfs_v, main_v = romfs_l.split(','), main_l.split(',')
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
-    files, results, common = [], [], None
+    files, results, common, ue5_on = [], [], None, False
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
         files += sorted((os.path.join(dp, f), (tag + '/' if tag else '') + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
@@ -2477,6 +2672,7 @@ def main():
         names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode')) if os.path.isdir(ued) else []
         if not names and uepak.unreal_paks(romfs, inline=False): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
         for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
+        ue5_on |= 'ShaderArchive-Packages.ushaderbytecode' in names   # Unreal Engine 5 shaders inline in the cooked packages (uepak.inline_archives): their shader maps give the pairs (ue5_map_jobs)
         results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
     for romfs in dlc_v:
         name = os.path.basename(os.path.normpath(romfs))
@@ -2491,21 +2687,23 @@ def main():
     tr_jobs, trp = trpfs_jobs(files)   # Pokémon Legends: Z-A's Trinity packs (data.trpfs and its index data.trpfd), decoded by the game's own Oodle in the Mac host
     ue_jobs, uep = ue_legacy_jobs(files)   # Unreal paks with inline shaders: DRAGON QUEST XI S's legacy ones (the game's own LZ5 in the Mac host), OCTOPATH TRAVELER II's (Zlib)
     io_jobs, iop = ue_io_jobs(files)   # UE 4.25 to 4.27 IoStore containers: the shader maps inline in their cooked packages
+    u5_jobs, u5p = ue5_map_jobs(files, ue5_on)   # UE 5 inline shaders: the pairs in the shader maps of the cooked packages and the global shader cache
     bd_jobs, bdts = bdt_jobs(files)   # Dark Souls Remastered's dvdbnd archives: the entries of each .bdt by its .bhd5 index, in ranges
     arc_jobs, arcs = smash_arc_jobs(files)   # Super Smash Bros. Ultimate's data.arc: its current files, in ranges
     pz_jobs, pkzs = pkz_jobs(files)   # Bayonetta 3's PKZ archives, Oodle Kraken decoded by the game's own decoder in the Mac host
     ck_jobs, cpks = cpk_jobs(files)   # Bayonetta 2's CRI CPK archives (CRILAYLA entries)
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
-    big += pak_jobs + tr_jobs + ue_jobs + io_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in iop and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs]
+    big += pak_jobs + tr_jobs + ue_jobs + io_jobs + u5_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in iop and p not in u5p and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
         if extra == 'defer': defer.append(rel)
-        elif isinstance(extra, dict): trees.update(extra)
+        elif isinstance(extra, dict): trees.update({k: v for k, v in extra.items() if k != UE5_STATS})
+    ue5 = [extra[UE5_STATS] for *_, extra in results if isinstance(extra, dict) and UE5_STATS in extra]   # the UE5 shader map jobs' counters (ue5_map_shaders)
     if defer:
         # a hash no bundle supplied takes the layout unityfs.py has for it (KNOWN_TREES); only here, so files a bundle lends a tree to keep their place in the tables (Ace Attorney's built-ins)
         import unityfs
@@ -2525,6 +2723,10 @@ def main():
                 if not same_shader(keys[key][2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {keys[key][0]})')
                 continue
             keys[key] = v; per_src[group(v[0])] += 1
+    if ue5:
+        more, missing, info, reds = ue5_summary(ue5, keys)
+        pairs |= more; pairs -= missing
+        for ln in info + reds: print(ln, flush=True)
     prog = {(a, b) for a, b, *t in pairs if t} - pairs; pairs = {x for x in pairs if len(x) == 2}
     sp, cover = separable_pairs(keys); pairs |= sp
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')
@@ -2571,7 +2773,7 @@ def main():
             for a, b in sorted(pairs): f.write(f'{a}\t{b}\n')
     if psopairsout:
         with open(psopairsout, 'w') as f:
-            f.write('# kind: evidence  supplemental vertex / pixel shader pairs (BAHS program variations and legacy Unity pass-input covers) for vertex output padding and the pipeline prebuild (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
+            f.write('# kind: evidence  supplemental vertex / pixel shader pairs (BAHS program variations' + (', legacy Unity pass-input covers and Unreal Engine 5 shader maps' if ue5 else ' and legacy Unity pass-input covers') + ') for vertex output padding and the pipeline prebuild (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
             for a, b in sorted(prog - pairs): f.write(f'{a}\t{b}\n')
     print(f'shaders: {len(rows)} (' + ', '.join(f'{STAGE_NAME[s]} {n}' for s, n in sorted(stat.items())) + '); sources ' + ', '.join(f'{g} {n}' for g, n in per_src.most_common()) + f'; compute shader answers {len(facts)} rows' + (f'; variation pairs {len(pairs)}' if pairsout else ''))
 
