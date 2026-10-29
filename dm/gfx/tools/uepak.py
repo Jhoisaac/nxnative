@@ -12,6 +12,8 @@
 # Unreal Engine 5 without shared material shader code (Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2) has neither: each shader map is inline in its cooked package's exports
 #   (ExportBundleData chunks of eleven IoStore containers) and the engine's in Engine/GlobalShaderCache-SP_GLSL_SWITCH.bin of pakchunk0-Switch.pak, every shader one Oodle stream; they are
 #   found by scanning (ue5_inline_shaders), decoded through the same OodleHost and written as version 2 archives too (inline_archives: 2,854 + 113,444 shaders).
+#   The shader maps also say which vertex and pixel shaders belong together: ue5_shader_maps / ue5_global_maps read them (the frozen FMemoryImage of each map, gated by its type layout hashes) for
+#   shader_split.py's pso_pairs.tsv.
 # The AES key is in main (Unreal embeds it): the 32-byte window of main's read-only or data segment that decrypts the index start to its mount point ("../../../"; Octopath Traveler 0: one window of
 #   116,287 tried). It is only kept in memory, never printed or written.
 # Pak footer (version 11, the last 0xdd bytes): encryption key GUID (16), encrypted index flag (u8), magic 0x5A6F12E1, version (u32), index offset (u64), index size (u64), index SHA-1 (20),
@@ -41,7 +43,7 @@
 #        uepak.py job <RomFS> <main NSO> <work dir> [<Mac host> <rewritten modules>]   the shader code archives of every pak, and an Oodle job of their Oodle-compressed shaders (LZ4 ones
 #                                                                       decoded at once); IoStore shader libraries (UE 5.6) decoded at once through the game's Oodle in the host (OodleHost)
 #        uepak.py finish <work dir> <out dir>                           after the host has run the job: the archives with every shader decoded
-import ctypes, json, os, re, struct, sys
+import collections, ctypes, json, os, re, struct, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
 
@@ -491,6 +493,261 @@ def ue5_inline_shaders(d, decode):
         i = m.start(); n = int.from_bytes(d[i - 4:i], 'little')
         if 2 <= n <= len(d) - i - 5 and struct.unpack_from('<i', d, i + n)[0] == n: take(d[i:i + n], d[i + n + 4])
     return out
+
+# ---- Unreal Engine 5 shader maps: the real vertex / pixel pairs (Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2) ----
+# A cooked material's FMaterialShaderMapContent (and the engine's FGlobalShaderMapContent) is a memory image (FMemoryImage) serialized inline after the material's properties:
+#   u32 count, then count x {u32 length with NUL, name, u32 hash}   the memory image's name table: the first N are the TYPE names (the root's first), then the FNames used in the image
+#   u32 FrozenSize, the frozen image (FrozenSize bytes)
+#   u32 N, N x {u64 index (0..N-1), u32 frozen size of the type, SHA-1 of its layout}   the type layout table, one row per type name in order (in the global cache each row starts with its own FString name
+#                                                                                       instead of an index, and no name table comes before the image)
+#   u32 nST, u32 nVF, nST x u64 shader type hashes, nVF x u64 vertex factory type hashes   FShaderMapPointerTable; then the FMemoryImageName patches, then FShaderMapResourceCode:
+#   u32 n, n x 20-byte shader hash, u32 n, n x {u32 length, stream, i32 raw size, u8 EShaderFrequency}   (the streams are ue5_inline_shaders' entries)
+# The frozen image is 64-bit: a pointer is a u64 whose low 24 bits are 1 (non-null; 0 is null) and whose upper 40 bits are a signed distance from the pointer itself to its target; TMemoryImageArray<T> is
+# {pointer, i32 Num, i32 Max}. The offsets below are the layout of one engine build: a map is read only when its types' layout hashes (the table above) are ones in UE5_MAP_LAYOUTS, so another engine
+# gives a [RED] line and no pairs, never wrong ones. A shader type is a type whose frozen size reaches the FShader members (target + 8): every other type of the table is smaller.
+MapLayout = collections.namedtuple('MapLayout', 'types perms shaders pipes meshes vf target resource slots deps found')
+_FSHADER = dict(types=0x18, perms=0x28, shaders=0x38, pipes=0x48, target=0xd0, resource=0xd4, slots=((8, 0), (0x10, 1), (0x18, 2), (0x20, 3), (0x28, 4)))   # FShaderMapContent base, FShader, FShaderPipeline
+UE5_MAP_LAYOUTS = {   # (root type name, its frozen size, its layout SHA-1) → the offsets; deps = the other types the walk reads, {name: (size, SHA-1)}, checked when the map has them
+    ('FMaterialShaderMapContent', 572, '36197f830bb149ff750d0910175517f54887b8b4'): MapLayout(meshes=0x60, vf=0x60, found='Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2', **_FSHADER, deps={
+        'FMeshMaterialShaderMap': (104, 'cc035a0c0b55828628a25cbb4df55e48acb5487c'), 'FShaderPipeline': (68, 'd730ca31ef9aefb7d3042317e1dd60f6eaf3ece4'), 'FHashedName': (8, '30fd5af790b755e56b0409fc43602589073952bb')}),
+}
+UE5_MAP_NO_PAIRS = ('FNiagaraShaderMapContent',)   # compute only: no vertex / pixel pair
+UE5_GLOBAL_LAYOUTS = {   # the same, for the engine's GlobalShaderCache-<format>.bin: FGlobalShaderMapContent (no mesh shader maps)
+    ('FGlobalShaderMapContent', 104, 'dd7532b8724177cb24645b6b5cda7bd81a19bcd3'): MapLayout(meshes=None, vf=None, **_FSHADER, found='Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2', deps={'FHashedName': (8, '30fd5af790b755e56b0409fc43602589073952bb')}),
+}
+CODE_SCAN = 1 << 14   # how far past the pointer table the resource code's counts are looked for
+
+class MapError(ValueError): pass
+
+def zen_header(d):
+    """The Zen package summary of an ExportBundleData chunk (UE 5.2 and later: 13 u32, no versioning info), its name map and its exports: {names, exports: [(start, size, name index)]}, or None when
+    an offset does not fit the chunk (an earlier or later summary, or no package). Only used for labels and ranges; the shader maps do not depend on it"""
+    try:
+        if len(d) < 0x38: return None
+        s = struct.unpack_from('<13I', d)
+        if s[0] or not 0x38 <= s[1] <= len(d): return None
+        o = 0x34; cnt, nb = struct.unpack_from('<II', d, o); o += 16
+        if not 0 < cnt < 1 << 20 or o + 10 * cnt + nb > s[1]: return None
+        lens = [int.from_bytes(d[o + 8 * cnt + 2 * i:o + 8 * cnt + 2 * i + 2], 'big') for i in range(cnt)]; o += 10 * cnt
+        names = []
+        for n in lens: names.append(d[o:o + n].decode('latin1')); o += n
+        if o > s[1]: return None
+        ex, bundles = s[8], s[9]
+        if not (ex <= bundles <= s[1]) or (bundles - ex) % 72: return None
+        exports = []
+        for i in range((bundles - ex) // 72):
+            off, size, name = struct.unpack_from('<QQI', d, ex + 72 * i)
+            if s[1] + off + size > len(d): return None
+            exports.append((s[1] + off, size, name))
+        return dict(names=names, exports=exports)
+    except (struct.error, UnicodeDecodeError): return None
+
+TYPE_TABLE = re.compile(b'(?s)[\x01-\xc8]\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')   # u32 N, then the first row's u64 index 0
+
+def _layout_rows(d, T, named=False):
+    """The type layout table at T: [(name or None, frozen size, SHA-1 hex)] and its end, or None when the rows do not count 0..N-1 (a false match)"""
+    n, o, rows = struct.unpack_from('<I', d, T)[0], T + 4, []
+    if not 3 <= n <= 0x400: return None   # a real table has more than the root and its first type
+    for i in range(n):
+        name = None
+        if named:
+            if o + 4 > len(d): return None
+            ln = struct.unpack_from('<I', d, o)[0]
+            if not 1 <= ln < 200 or o + 4 + ln + 24 > len(d) or d[o + 3 + ln]: return None
+            name = d[o + 4:o + 3 + ln].decode('latin1'); o += 4 + ln
+        else:
+            if o + 32 > len(d) or struct.unpack_from('<Q', d, o)[0] != i: return None
+            o += 8
+        rows.append((name, struct.unpack_from('<I', d, o)[0], d[o + 4:o + 24].hex())); o += 24
+    return rows, o
+
+def _name_table(d, lo, T):
+    """The name table that ends before the frozen image the layout table at T closes: (names, end) of the one nearest below T (above lo), or None. It starts with the root type's name"""
+    k = d.rfind(b'ShaderMapContent\x00', lo, T)
+    if k < 0: return None
+    for p in range(k, max(lo + 8, k - 64), -1):
+        ln = struct.unpack_from('<I', d, p - 4)[0]
+        if ln < 18 or d.find(b'\x00', p, p + ln) != p + ln - 1 or d[p] not in b'FT': continue
+        cnt, o, names = struct.unpack_from('<I', d, p - 8)[0], p - 4, []
+        for _ in range(cnt):
+            if o + 4 > len(d): break
+            ln = struct.unpack_from('<I', d, o)[0]
+            if not 1 <= ln < 300 or o + 8 + ln > len(d) or d[o + 3 + ln]: break
+            names.append(d[o + 4:o + 3 + ln].decode('latin1')); o += 8 + ln
+        if len(names) == cnt: return names, o
+    return None
+
+def _code_run(d, at, end):
+    """The FShaderMapResourceCode after the pointer table: the first position from `at` where u32 n, n x 20 bytes, u32 n agree and n entries {u32 length, stream, i32 raw size, u8 frequency} fit
+    before `end`. → ([hash], [(start, length, raw size, frequency)], end of the last entry), or None"""
+    for q in range(at, min(at + CODE_SCAN, end - 8)):
+        n = struct.unpack_from('<I', d, q)[0]
+        if not 0 < n < 1 << 20 or q + 8 + 20 * n > end or struct.unpack_from('<I', d, q + 4 + 20 * n)[0] != n: continue
+        e, ents = q + 8 + 20 * n, []
+        for _ in range(n):
+            if e + 4 > end: break
+            ln = struct.unpack_from('<I', d, e)[0]
+            if ln > end - e - 9: break
+            raw, fr = struct.unpack_from('<iB', d, e + 4 + ln)
+            if not 0 < raw < 1 << 24 or fr > 5 or not (d[e + 4:e + 8] == b'LSLG' and ln == raw or d[e + 4:e + 5] in b'\x8c\xcc' and ln < raw): break   # one Oodle stream, or the record itself
+            ents.append((e + 4, ln, raw, fr)); e += 9 + ln
+        if len(ents) == n: return [d[q + 4 + 20 * i:q + 24 + 20 * i] for i in range(n)], ents, e
+    return None
+
+class _Frozen:
+    """A frozen memory image d[b:b + size] and its pointers; every read is checked against the image"""
+    def __init__(self, d, b, size): self.d, self.b, self.size = d, b, size
+    def _at(self, o, n):
+        if not 0 <= o <= self.size - n: raise MapError(f'{n} bytes at {o:#x} are outside the {self.size:#x} byte image')
+        return self.b + o
+    def u32(self, o): return struct.unpack_from('<I', self.d, self._at(o, 4))[0]
+    def i32(self, o): return struct.unpack_from('<i', self.d, self._at(o, 4))[0]
+    def u64(self, o): return struct.unpack_from('<Q', self.d, self._at(o, 8))[0]
+    def ptr(self, o, plain=True):
+        """The target offset of the pointer at o (None for null). An array's data pointer has 1 in its low 24 bits in every layout known; the elements of an array of TMemoryImagePtr (shaders,
+        pipelines, mesh shader maps) keep their type there (plain=False)"""
+        v = self.u64(o)
+        if not v & 1: return None
+        if plain and v & 0xffffff != 1: raise MapError(f'the pointer at {o:#x} has low bits {v & 0xffffff:#x}')
+        t = v >> 24
+        t = o + (t - (1 << 40) if t >= 1 << 39 else t)
+        self._at(t, 0); return t
+    def need(self, o, plain=True):
+        """ptr(), refusing a null pointer"""
+        p = self.ptr(o, plain)
+        if p is None: raise MapError(f'the pointer at {o:#x} is null')
+        return p
+    def array(self, o):
+        """(first element offset, count) of the TMemoryImageArray at o"""
+        n = self.i32(o + 8)
+        if n < 0 or n > self.size // 4: raise MapError(f'the array at {o:#x} counts {n}')
+        return (self.need(o) if n else 0), n
+
+def _walk(d, b, size, lay, types, svf, entries, hashes):
+    """One image's shader maps → [dict(vf, shaders=[(type hash, permutation, frequency, entry)], pipes=[(pipeline type hash, {frequency: entry})])]: the root (no vertex factory: vf 0) and its mesh
+    shader maps. Raises MapError when the image does not satisfy what the layout assumes"""
+    f = _Frozen(d, b, size); known = set(types)
+    def stage(o, fr_want=None):
+        tg, ri = f.u32(o + lay.target), f.u32(o + lay.resource)
+        if ri >= len(entries): raise MapError(f'shader at {o:#x} names code entry {ri} of {len(entries)}')
+        if tg & 0xf != entries[ri][3]: raise MapError(f'shader at {o:#x} has frequency {tg & 0xf} but its code entry says {entries[ri][3]}')
+        if fr_want is not None and tg & 0xf != fr_want: raise MapError(f'shader at {o:#x} has frequency {tg & 0xf} but sits in the pipeline slot of frequency {fr_want}')
+        return tg & 0xf, ri
+    def one(base, vf):
+        st, n = f.array(base + lay.types); pm, n1 = f.array(base + lay.perms); sh, n2 = f.array(base + lay.shaders)
+        if not n == n1 == n2: raise MapError(f'shader map at {base:#x}: {n} types, {n1} permutations, {n2} shaders')
+        shaders = []
+        for j in range(n):
+            th = f.u64(st + 8 * j)
+            if th not in known: raise MapError(f'shader map at {base:#x}: type hash {th:#x} is not in the pointer table')
+            fr, ri = stage(f.need(sh + 8 * j, False)); shaders.append((th, f.i32(pm + 4 * j), fr, ri))
+        pipes, (pa, pn) = [], f.array(base + lay.pipes)
+        for j in range(pn):
+            po = f.need(pa + 8 * j, False); stages = {}
+            for slot, fr_want in lay.slots:
+                if f.u64(po + slot) & 1: stages[fr_want] = stage(f.need(po + slot, False), fr_want)[1]
+            pipes.append((f.u64(po), stages))
+        return dict(vf=vf, shaders=shaders, pipes=pipes)
+    out = [one(0, 0)]
+    if lay.meshes is not None:
+        arr, n = f.array(lay.meshes)
+        if n != svf: raise MapError(f'{n} mesh shader maps, {svf} vertex factory types in the pointer table')
+        for i in range(n):
+            m = f.need(arr + 8 * i, False); out.append(one(m, f.u64(m + lay.vf)))
+    return out
+
+def _table_end(rows, T, named):
+    return T + 4 + sum((5 + len(n) if named else 8) + 24 for n, _, _ in rows)
+
+def _read_image(d, label, red, x, T, rows, names, layouts, named, seen, stats, limit):
+    """The map of the image whose FrozenSize is at x and layout table at T: ({root, layout, types, submaps, entries, data}, end of its code run) or (None, end of the pointer table). The
+    layout gate: the root's (name, size, SHA-1) must be one of `layouts`, and the dependent types the layout names must agree where the image has them"""
+    o = _table_end(rows, T, named)
+    nst, nvf = struct.unpack_from('<II', d, o); o += 8
+    if nst > 1 << 16 or nvf > 1 << 16 or o + 8 * (nst + nvf) > len(d): return None, o, 'pointer table'
+    sth = struct.unpack_from(f'<{nst}Q', d, o); o += 8 * (nst + nvf)
+    run = _code_run(d, o, limit)
+    if run is None: return None, o, 'no resource code'
+    hashes, ents, end = run
+    root = names[0]
+    if root in UE5_MAP_NO_PAIRS: stats['skipped ' + root] += 1; return None, end, None
+    key = (root, rows[0][1], rows[0][2]); lay = layouts.get(key)
+    if lay is None:
+        seen.setdefault(key, label)   # reported once per layout by the caller (unknown_layout)
+        stats['unknown layout'] += 1; return None, end, None
+    for i, nm in enumerate(names):
+        if nm in lay.deps and rows[i][1:] != lay.deps[nm]:
+            red(f'{label}: {nm} layout {rows[i][2]} (frozen size {rows[i][1]}) differs from the one the {root} layout was found with ({lay.deps[nm][1][:12]}, {lay.deps[nm][0]}); its shader maps give no pairs')
+            stats['dependent layout'] += 1; return None, end, None
+    shader_rows = [i for i in range(1, len(rows)) if rows[i][1] >= lay.target + 8]
+    if len(shader_rows) != nst: red(f'{label}: {len(shader_rows)} shader types in the layout table but {nst} in the pointer table; its shader maps give no pairs'); stats['type count'] += 1; return None, end, None
+    types = {h: names[i] for h, i in zip(sth, shader_rows)}
+    try: subs = _walk(d, x + 4, T - x - 4, lay, types, nvf, ents, hashes)
+    except MapError as e: red(f'{label}: {root}: {e}; its shader maps give no pairs'); stats['broken map'] += 1; return None, end, None
+    return dict(root=root, layout=rows[0][2], types=types, submaps=subs, entries=ents, hashes=hashes, data=d), end, None
+
+def unknown_layout(key, label, layouts):
+    """The [RED] line for a root layout that is in no row of `layouts` (key = (root name, frozen size, SHA-1), label = where it was first met)"""
+    return f'[RED] {label}: {key[0]} layout {key[2]} (frozen size {key[1]}) is not one this reader knows (known: {", ".join(f"{k[2][:12]} ({k[1]})" for k in layouts) or "none"}); its shader maps give no pairs'
+
+def ue5_shader_maps(d, label, red, layouts=None, stats=None, seen=None):
+    """The shader maps in one ExportBundleData chunk (UE 5 cooked material or material instance packages): [dict(root, layout, types {type hash: name}, submaps [dict(vf, shaders [(type hash,
+    permutation, frequency, entry)], pipes [(pipeline type hash, {frequency: entry})])], entries [(start, length, raw size, frequency)] in d, hashes [20-byte shader hash per entry], data)]. The
+    first image of a package has a name table in front; a later one (a package of several maps) has none and is walked only when its layout table equals the last named one's. red(msg) gets the text of each
+    [RED] line, without the prefix, for a map that breaks a check (dropped whole); an unknown root layout is not reported here but put in `seen` {key: label} for unknown_layout, once per layout. stats counts what was not walked. A chunk with no shader map gives [] and no line"""
+    layouts = UE5_MAP_LAYOUTS if layouts is None else layouts
+    stats = collections.Counter() if stats is None else stats; seen = {} if seen is None else seen
+    if b'ShaderMapContent\x00' not in d: return []
+    tables = [(m.start(), got) for m in TYPE_TABLE.finditer(d, 4) if (got := _layout_rows(d, m.start()))]
+    maps, last, lo = [], None, 0
+    for k, (T, (rows, tend)) in enumerate(tables):
+        if T < lo: continue
+        nt = _name_table(d, lo, T)
+        if nt and len(nt[0]) >= len(rows):
+            names, o = nt[0][:len(rows)], nt[1]; x = next((x for x in range(o, min(o + 256, T - 3)) if struct.unpack_from('<I', d, x)[0] == T - x - 4), None)
+            last = (names, rows)
+        elif last is not None and rows == last[1]:   # an image without a name table of its own: the last named one's types
+            names = last[0]; x = next((x for x in range(T - 4 - rows[0][1], max(lo, T - (1 << 22)), -1) if struct.unpack_from('<I', d, x)[0] == T - x - 4 and d[x + 4] & 1 and d[x + 5:x + 7] == b'\x00\x00'), None)   # the image starts with a pointer (the root's hash table)
+        else:
+            stats['unnamed image, other layout' if last else 'no name table'] += 1
+            if last: red(f'{label}: an image without a name table whose type layout is not the first image\'s; its shader maps give no pairs')
+            continue
+        if x is None: stats['no image start'] += 1; continue
+        try: mp, lo, why = _read_image(d, label, red, x, T, rows, names, layouts, False, seen, stats, tables[k + 1][0] if k + 1 < len(tables) else len(d))
+        except (struct.error, IndexError): mp, lo, why = None, tend, 'truncated'
+        if why: stats[why] += 1
+        if mp: maps.append(mp)
+    return maps
+
+def ue5_global_maps(d, label, red, layouts=None, stats=None, seen=None):
+    """The shader maps of a GlobalShaderCache-<format>.bin: u32 section count, then per section ff ff ff ff, u32 1, u32 FrozenSize, the image, the layout table with each row's own name, the
+    pointer table and the resource code (ue5_shader_maps: the same dicts). The global shader map has no mesh shader maps"""
+    layouts = UE5_GLOBAL_LAYOUTS if layouts is None else layouts
+    stats = collections.Counter() if stats is None else stats; seen = {} if seen is None else seen
+    maps = []
+    try:
+        n, o = struct.unpack_from('<I', d, 0)[0], 4
+        for k in range(n):
+            if d[o:o + 8] != b'\xff\xff\xff\xff\x01\x00\x00\x00': raise MapError(f'section {k} does not start where the last one ended')
+            size = struct.unpack_from('<I', d, o + 8)[0]; x = o + 8; T = x + 4 + size
+            got = _layout_rows(d, T, True)
+            if got is None: raise MapError(f'section {k}: no type layout table')
+            rows, _ = got
+            mp, o, why = _read_image(d, f'{label} section {k}', red, x, T, rows, [r[0] for r in rows], layouts, True, seen, stats, len(d))
+            if why: raise MapError(f'section {k}: {why}')
+            if mp: maps.append(mp)
+    except (MapError, struct.error) as e: red(f'{label}: {e}; the rest of its shader maps give no pairs'); stats['global cache'] += 1
+    return maps
+
+def ue5_entry(mp, i, decode):
+    """The decoded LSLG record of a map's code entry i (ue5_inline_shaders' two forms: one Oodle stream, or the record itself), or None when the bytes are no record of its frequency"""
+    start, ln, raw, fr = mp['entries'][i]; s = mp['data'][start:start + ln]
+    if s[:4] != b'LSLG':
+        try: s = decode(s, raw)
+        except ValueError: return None
+    try: return s if s[:4] == b'LSLG' and TAG_FREQ.get(s[4:6].decode('latin1')) == fr and lslg(s) else None
+    except struct.error: return None
+
 
 def made_archive(shaders):
     """A version 2 shader code archive of decoded shaders [(frequency, record)], the form the shader tools read: no shader maps, each shader's hash its SHA-1"""

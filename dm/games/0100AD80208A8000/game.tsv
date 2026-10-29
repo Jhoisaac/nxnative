@@ -43,3 +43,7 @@ depth_mode	zero
 # the decoded shader code archives: the engine's global shaders and the game's material shaders
 shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
 shader_note	Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 shaders (provisional profile)
+# the pipeline (FShaderPipeline type hash, decimal) of the velocity pass: its 18,964 vertex / pixel pairs are not made from the shader maps. Cause: none of the 2,061 pairs the game drew
+# is one of them, so it never draws the pass; the cooked config agrees (r.AntiAliasingMethod=1 FXAA, r.DefaultFeature.MotionBlur=False, the Switch device profile sets r.MotionBlurQuality=0,
+# r.DepthOfFieldQuality=0 and r.SSR.Quality=0) but does not prove it, and the C++ condition for drawing it is not in any game file. Open: derive it from the renderer settings instead of listing the hash
+ue_pair_skip_pipelines	4796137682406815049
