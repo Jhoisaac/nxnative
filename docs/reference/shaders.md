@@ -906,6 +906,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game), during review of its offline archive path with synthetic libraries and pair lists; no new gameplay or iPhone run. The empty pair list on [ANIMAL WELL](../../dm/games/010020D01AD24000/README.md#found-on-this-game).
 - **Check:** `dm/tools/tests/test_pso_offline.py` changes vertex and fragment library bytes without changing entries or stamps, and exercises the all-constant plan, the header-only pair list and pairs all left out. `t_pso_bundle` rejects bare headers, truncated archives, malformed load commands and out-of-range universal slices, accepts real offline and serialized archives, and rejects zero-probe coverage.
 
+### metal-tt's backend overflows its stack on a large archive
+
+- **Symptom:** making a Mac pipeline archive stops after tens of minutes with `air-tt: applegpu-nt command failed`, and no `.mtl4a` is written; the crash report of `air-nt` says `Thread stack size exceeded due to excessive recursion` (SIGSEGV on the main thread, in `llvm_shutdown`).
+- **Cause:** after compiling every base, `metal-tt`'s backend frees its module with a recursion as deep as the pipelines script is long. The main thread's stack is sized from `RLIMIT_STACK` when the process starts, and the default soft limit is 8 MB (the hard limit on macOS is 64 MB); 108,611 bases went past it. Python's `resource.setrlimit` refuses to raise `RLIMIT_STACK` on macOS ("current limit exceeds maximum limit"), so the script cannot raise it for its children itself.
+- **Fix:** `pso_offline.py` (`big_stack`) runs `metal-tt` under `/bin/sh` with `ulimit -s` set to the hard limit and then `exec`s it, so `xcrun`, `metal-tt` and `air-nt` start with a 64 MB main thread stack (every game).
+- **Found on:** [Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2](../../dm/games/0100AD80208A8000/README.md#found-on-this-game), with the pairs decoded from its Unreal shader maps (108,611 bases): the archive build stopped after 36 minutes; with the fix it finished in 40 minutes, 2.6 GB. Its usual archive (the profile's own pairs) never reached the limit.
+- **Check:** `dm/tools/tests/test_pso_offline.py` (`Stack`): a command run through `big_stack` sees the hard limit as its soft limit, its arguments pass unchanged, and the build tests take `metal-tt` only through it.
+
 ### Metal's build folders left by pipeline archive flushes
 
 - **Symptom:** the user cache folder (`getconf DARWIN_USER_CACHE_DIR`, then `com.apple.gpuarchiver/`) fills with `gpuarchiver-*` folders of 0.3–5 MB each, one per pipeline archive flush (456 folders, 2.5 GB after two days). A later compile can fail with `cannot open '…/gpuarchiver-…/PersistentState': No such file or directory`.

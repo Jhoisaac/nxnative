@@ -23,7 +23,7 @@
 #   --gpu: architectures, with or without the applegpu_ prefix (default g18p); --depth: the game's NVN depth mode (gl = near -w, NVN's default; zero = near 0, which the game sets
 #   with nvnDeviceSetDepthMode: the host knows it only at run time, so the profile says it; a wrong one costs the device its own prebuild, as without the archive);
 #   --os-min: the archives' minimum OS (default: the SDK's major version, e.g. 27.0; a device on an older system cannot open them and builds the bases itself)
-import argparse, hashlib, json, os, shutil, struct, subprocess, sys, time
+import argparse, hashlib, json, os, resource, shutil, struct, subprocess, sys, time
 from pathlib import Path
 
 LAYER = b'render_target_array_index'
@@ -142,6 +142,15 @@ def library_digest(lib_dir, bases):
     return h.hexdigest()
 
 
+def big_stack(cmd):   # metal-tt's backend (air-nt) frees its module with a recursion as deep as the script is long: with 108,611 bases (Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2's decoded
+    # shader map pairs) it overflowed the default 8 MB main thread stack in llvm_shutdown after compiling (SIGSEGV, "Thread stack size exceeded due to excessive recursion"). The main thread's stack is
+    # sized from RLIMIT_STACK at exec and xcrun, metal-tt and air-nt inherit it: the command runs under a shell that raises the soft limit to the hard one (64 MB on macOS; Python's own
+    # setrlimit refuses to raise RLIMIT_STACK there)
+    hard = resource.getrlimit(resource.RLIMIT_STACK)[1]
+    kb = 'unlimited' if hard == resource.RLIM_INFINITY else str(hard // 1024)
+    return ['/bin/sh', '-c', f'ulimit -s {kb} 2>/dev/null; exec "$@"', 'metal-tt'] + cmd
+
+
 def sdk(platform):
     return 'iphoneos' if platform == 'ios' else 'macosx'
 
@@ -209,6 +218,7 @@ def main(argv=None):
         kf.unlink(missing_ok=True); dst.unlink(missing_ok=True)
         part = work / f'{arch}.mtl4a.partial'; part.unlink(missing_ok=True)
         cmd = ['xcrun', '-sdk', sdk(a.platform), 'metal-tt', '-arch', arch, f'-{a.platform}-version-min', osmin, str(js), '-o', str(part)]
+        cmd = big_stack(cmd)
         t1 = time.time(); print(f'pso_offline: {arch}: metal-tt, {len(bases)} bases (minutes) ...', flush=True)
         with open(work / f'metal-tt.{arch}.log', 'w') as log:
             r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, TMPDIR=str(work)))   # its temporary files on the work folder's volume

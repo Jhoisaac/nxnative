@@ -1,5 +1,5 @@
 """The pipeline archive made offline (dm/gfx/tools/pso_offline.py): the pairs as the host reads them, the stamp the host compares (pso_prebuild's pre_stamp), the function list of a
-.metallib header, the bases the host's prebuild would make (pre_desc) and those it leaves out, the pipelines script, and the per-architecture reuse of metal-tt's archives.
+.metallib header, the bases the host's prebuild would make (pre_desc) and those it leaves out, the pipelines script, the per-architecture reuse of metal-tt's archives and the stack limit it runs with.
 No game files, Xcode or GPU needed (metal-tt is replaced; temporary files only in a temporary folder)."""
 import contextlib
 import hashlib
@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import resource
 import shutil
 import struct
 import subprocess
@@ -147,6 +148,7 @@ class Build(unittest.TestCase):
         cmd = [str(c) for c in cmd]
         if '-version' in cmd: return subprocess.CompletedProcess(cmd, 0, 'AIR-TT 1.0\n', '')
         if '--show-sdk-version' in cmd: return subprocess.CompletedProcess(cmd, 0, '27.1\n', '')
+        self.assertEqual(cmd[:4], po.big_stack([])); cmd = cmd[4:]   # metal-tt runs under the raised stack limit
         self.calls.append(cmd); Path(cmd[cmd.index('-o') + 1]).write_bytes(b'archive ' + cmd[cmd.index('-arch') + 1].encode())
         return subprocess.CompletedProcess(cmd, 0)
 
@@ -230,6 +232,15 @@ class Build(unittest.TestCase):
         with mock.patch.object(po.subprocess, 'run', fail), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
             po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work)])
         self.assertEqual(list(self.out.glob('*.mtl4a')), [])
+
+
+class Stack(unittest.TestCase):
+    def test_big_stack_raises_the_soft_limit_to_the_hard_one(self):   # air-nt overflowed the default 8 MB main thread stack with 108,611 bases
+        hard = resource.getrlimit(resource.RLIMIT_STACK)[1]
+        r = subprocess.run(po.big_stack(['/bin/sh', '-c', 'ulimit -s']), capture_output=True, text=True, check=True)   # the command's own process inherits it
+        self.assertEqual(r.stdout.strip(), 'unlimited' if hard == resource.RLIM_INFINITY else str(hard // 1024))
+        r = subprocess.run(po.big_stack(['/bin/echo', 'a b', '$HOME']), capture_output=True, text=True, check=True)   # arguments pass through unchanged
+        self.assertEqual(r.stdout, 'a b $HOME\n')
 
 
 class Default(unittest.TestCase):
