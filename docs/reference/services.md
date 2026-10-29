@@ -124,6 +124,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Monster Train 2](../../dm/games/010051701FB46000/README.md) at 60 fps: two runs in three as the route map loads, never at 30 fps.
 - **Check:** four runs at 60 fps: one retry, no failed read.
 
+### ReadFile overload for a complete read with read options
+
+- **Symptom:** right after a mount (`fs mount AddOn: → …`), `CRASH sig=11 addr=0x4000028000000034 pc=sdk+0x1e34cc` in `nn::fs::detail::FileAccessor::Read`, x0 a host file handle (`1<<62 | mount << 36 | entry << 4`).
+- **Cause:** `nn::fs::ReadFile` has four overloads (with or without the bytes-read output, with or without `ReadOption`); the host hooked three. The fourth, `ReadFile(FileHandle, long, void*, unsigned long, ReadOption const&)`, ran the SDK's own code, which takes the handle for a pointer to its `FileAccessor` and reads through it.
+- **Fix:** `h_fs_ReadFileExactOpt` (`hle_fs.c`) answers it as the complete read it is (`h_fs_ReadFileExact`; the options are ignored as in the other overload with them).
+- **Found on:** My Hero One's Justice 2 (title 01007E700DBF6000, a provisional profile, not in the games table): it reads `AddOn:/DLC.json` with it after mounting its first add-on; with the fix it mounts its 39 add-ons and boots on.
+- **Check:** `dm/host/tests/t_fs.c` reads an image file whole through both complete-read overloads and fails one that runs past the end.
+
 ### File-not-found noise from optional paths
 
 - **Symptom:** `fs … not found` lines with `DM_FS=1`.
