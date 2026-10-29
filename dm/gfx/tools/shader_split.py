@@ -667,6 +667,76 @@ def pg_sized_shader(d, label):
     if why: red(f'{label} ({st}): {why}')
     return [(f'{label}#PGSO', st, ctl, code)]
 
+IGA, IGZ = b'IGA\x1a', b'\x01ZGI'
+def iga_chunk(d, pos, left, packed=None):
+    """one chunk of an IGA file: u32 compressed length n (at most 0x8100), then a raw LZMA1 stream (props byte, u32 dictionary size 0x8000, data) that decodes to at most left <= 0x8000 bytes; the
+    decoder is given 59 bytes past n, which are the next chunk's header or padding. A stored chunk is the 0x8000 bytes as they are. packed: whether the chunk is compressed (the table says), None to
+    decide by the header. -> (data, bytes the chunk takes), or None when there is no such chunk or it does not decode"""
+    import lzma
+    if not 0 <= pos <= len(d) - 9: return None
+    n, dic = struct.unpack_from('<I', d, pos)[0], struct.unpack_from('<I', d, pos + 5)[0]
+    props = d[pos + 4]
+    if packed is None: packed = props < 225 and 9 <= n <= 0x8100 and dic == 0x8000
+    if not packed: return (d[pos:pos + left], 0x8000) if pos + left <= len(d) else None
+    if props >= 225 or not 9 <= n <= 0x8100 or dic != 0x8000: return None
+    try:
+        lz = lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[{'id': lzma.FILTER_LZMA1, 'dict_size': dic, 'lc': props % 9, 'lp': props // 9 % 5, 'pb': props // 45}])
+        return lz.decompress(d[pos + 9:pos + 4 + n + 64], max_length=left), n + 4
+    except lzma.LZMAError: return None
+
+def iga_file(d, off, size, al, run, keep):
+    """the chunks of one IGA file (iga_members): from off, each next one at the end of the previous rounded up to al, or at the starts of the table entries in run (bit 15: compressed). → (data, whole),
+    None when a chunk is missing or the length is not size; keep(first chunk) false: (the first chunk, False)"""
+    out, pos = b'', off
+    for c in range(-(-size // 0x8000)):
+        if run: pos = off + (run[c] & 0x7fff) * al
+        r = iga_chunk(d, pos, min(0x8000, size - len(out)), bool(run[c] & 0x8000) if run else None)
+        if not r: return None
+        out += r[0]; pos = -(-(pos + r[1]) // al) * al
+        if c == 0 and keep and not keep(out): return out, False
+    return (out, True) if len(out) == size else None
+
+def iga_members(d, label, keep=None):
+    """Alchemy archive ('IGA\\x1a'; Crash Team Racing Nitro-Fueled keeps its 401 '.pak' files, 9.6 GB, in this form, and archives/shaders_nx.pak holds its precompiled GLSLC outputs): u32 version (0xd),
+    u32 header length, u32 file count, u32 alignment (0x800), u32 checksum, then +0x38 u32 hashes[count], one 16-byte record per file {u32 data offset, u32 a, u32 length, u32 tag = index | 0x20000000,
+    or 0xffffffff for a file stored as it is} and a u16 table up to the first file (the header length is short of the records in the small archives, 0x108 for 11 files, so it is not used).
+    A file is a series of chunks (iga_chunk), each decoding to 0x8000 bytes (the last fewer), compressed or stored as they are (a115_skull_rock.pak's larger files, basekart.pak's Havok data), each
+    starting at a multiple of the alignment. The u16 table holds a chunk's start in alignment units from the file's data offset, bit 15 set when it is compressed; a file's run is its chunk count of
+    entries and one for the end (set in shaders_nx.pak, where a run's end entry is the only one without the bit).
+    Which chunks a file has: each starts where the previous one ended, rounded up to the alignment, except in two of the 87 files of shaders_nx.pak (55 and 64) and one of juicedomain_scrapbook.pak
+    (file 19, stored last chunk), whose chunks have gaps: their starts are the table run at the tag's low 29 bits. UNRESOLVED: that is a fit, not the format's own rule (25 files of shaders_nx.pak have a
+    run there that starts at 0 and gives the sequential chunks too; in the others the tag lands inside another file's run or outside the table; record field a is not the table index), so a run is used
+    first when it starts at 0 and rises, and the sequential chunks are the rule when there is none or it does not decode.
+    keep: called with a file's first chunk, the rest is decoded only when it returns true. -> (file number, data) of each file kept"""
+    ver, _, n, al = field(d, '<4I', 4, label)
+    if ver != 0xd or al < 4 or al & al - 1: red(f'{label}: IGA version {ver:#x}, alignment {al:#x}: only version 0xd is known')
+    rec, tab = 0x38 + 4 * n, 0x38 + 20 * n
+    recs = [field(d, '<4I', rec + 16 * i, label) for i in range(n)]
+    end = min([r[0] for r in recs] + [len(d)])
+    if tab > end: red(f'{label}: IGA header of {n} files, the first file at {end:#x}')
+    t = struct.unpack_from(f'<{(end - tab) // 2}H', d, tab)
+    for i, (off, _, size, tag) in enumerate(recs):
+        where, k = f'{label}#{i}', -(-size // 0x8000)
+        if tag == 0xffffffff:
+            data = span(d, off, size, where)
+            if not keep or keep(data[:0x8000]): yield i, data
+            continue
+        j = tag & 0x1fffffff
+        run = t[j:j + k] if k and j + k < len(t) and not t[j] & 0x7fff else None   # k starts and an end entry after them, the first at the file's offset
+        if run and any(x & 0x7fff >= y & 0x7fff for x, y in zip(t[j:j + k], t[j + 1:j + k + 1])): run = None   # the starts rise (not the table's zero fill)
+        r = run and iga_file(d, off, size, al, run, keep) or iga_file(d, off, size, al, None, keep)
+        if not r: red(f'{where}: its {k} chunks from {off:#x} do not decode to {size:#x} bytes')
+        elif r[1]: yield i, r[0]
+
+def iga_keep(head):   # an effect member (IGZ) whose first chunk names its shader source ('data/shared/shaders/<name>.asl'); textures, models and the shader index ('shaders/<name>.igz') hold no GLSLC output
+    return head[:4] == IGZ and b'.asl\0' in head
+
+def iga_shaders(d, label):
+    """the GLSLC outputs (glslc_shaders) in the effect members of an IGA archive (iga_members); the game never compiles them, it hands them to the driver as they are"""
+    out = []
+    for i, m in iga_members(d, label, iga_keep): out += glslc_shaders(m, f'{label}#{i}', need=False)
+    return out
+
 MTARC, MTSPK = b'ARC\0', b'SPK\0'
 def mtarc_members(d, label):
     """Capcom's MT Framework archive (The Great Ace Attorney Chronicles: 447 '.arc' files under nativeNXx64): 'ARC\\0', u16 version 7, u16 entry count, then one 0x90-byte entry per file
@@ -2211,6 +2281,9 @@ def scan_file_in(args):
     if head[:4] == MTARC:   # an MT Framework archive (mtarc_members): its shader package
         mtarc_shaders(open(path, 'rb').read(), '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == IGA:   # an Alchemy archive (iga_members): the GLSLC outputs in its effect files
+        found += iga_shaders(open(path, 'rb').read(), '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == SCNE:   # a Bezel Engine archive (bea_members): each entry scanned as a file of its own (the shaders are BNSH in its .bfsha entries)
         for nm, m in bea_members(open(path, 'rb').read(), '/' + rel): scan_blob(m, f'/{rel}/{nm}', found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -2312,10 +2385,10 @@ def main():
         found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)
         found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c for _, _, c, _ in found})
         # GLSLC outputs the game compiles at run time, captured on the Mac (hle_glslc.c): <version dir>/glslc_capture, or DM_GLSLC_CAPTURE. A game needs them when main holds GLSL sources and
-        # calls glslcCompile in a module it loads (Fire Emblem: Three Houses; profile_guess.py shader_sources). Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it
+        # calls glslcCompile in a module it loads (Fire Emblem: Three Houses; profile_guess.py shader_sources); the marker file compiled_none (capture_glslc) says a boot found that the game compiles none (Crash Team Racing Nitro-Fueled). Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it
         cap = os.environ.get('DM_GLSLC_CAPTURE') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'glslc_capture')
         names = sorted(f for f in os.listdir(cap) if f.endswith('.glslc')) if os.path.isdir(cap) else []
-        if not names and glsl_sources(img) and 'glslcCompile' in main_imports(img) and glslc_module(os.path.dirname(os.path.abspath(mainnso))):
+        if not names and not os.path.exists(os.path.join(cap, 'compiled_none')) and glsl_sources(img) and 'glslcCompile' in main_imports(img) and glslc_module(os.path.dirname(os.path.abspath(mainnso))):
             print(f'[RED] main holds GLSL sources and imports glslcCompile, but there are no captured GLSLC outputs in {cap}: the shaders the game compiles at run time will have no translation', flush=True)
         for nm in names: found += glslc_shaders(open(os.path.join(cap, nm), 'rb').read(), f'/glslc_capture/{nm}')
         # Unreal Engine shader code archives decoded on the Mac (uepak.py): <version dir>/ue_shaders, or DM_UE_SHADERS; needed when the RomFS has Unreal paks

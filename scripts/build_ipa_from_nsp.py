@@ -1096,6 +1096,17 @@ def glslc_done(d):   # capture files written whole: a GLSLC output (magic 0x1986
     return out
 
 
+GLSLC_NONE = 'compiled_none'   # in a capture folder with no output: the game reached its frame loop in the capture boot (no input) without compiling a shader; what it compiles later in play is not captured (shader_split.py reads the name)
+
+
+def glslc_empty(d): return (d / GLSLC_NONE).is_file()
+
+
+def reached_frames(log):   # the host's log has a frame counter line ('[dm] [nvn] frame 300: …'): the game got to its frame loop
+    try: return re.search(r'^(?:\[dm\] )?\[nvn\] frame \d+:', Path(log).read_text(errors='replace'), re.M) is not None
+    except OSError: return False
+
+
 def apple_silicon():   # hw.optional.arm64 is 1 on Apple silicon (for a Python under Rosetta too); an Intel Mac has no such key
     return subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], capture_output=True, text=True).stdout.strip() == '1'
 
@@ -1150,9 +1161,11 @@ def host_stopped(log, rc, secs):   # a capture run whose host stopped by itself 
 def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
     """A game that compiles some shaders at run time with its own GLSLC (Fire Emblem: Three Houses; profile_guess.py shader_sources), so no game file holds them. The game boots in the Mac host
     (headless and silent) with DM_GLSLC_CAPTURE (dm/host/hle_glslc.c), which writes each output to <version dir>/glslc_capture, where shader_split.py reads them; the outputs are the same on every run.
-    dirs: {shader version: its extraction}; a folder that already holds every file the profile's shader map names is reused"""
+    dirs: {shader version: its extraction}; a folder that already holds every file the profile's shader map names is reused. A boot that reaches the frame loop with no output, for a profile that names none, is
+    not an error, but a red line: the shaders the game draws first are in its files, and the boot gives no input, so a compile behind a menu is not captured (Crash Team Racing Nitro-Fueled compiles
+    two after its language select); the folder then holds only the marker GLSLC_NONE, which is reused like a capture"""
     want = glslc_wanted(g)
-    todo = [v for v, d in dirs.items() if not (glslc_done(d / 'glslc_capture') >= want if want else glslc_done(d / 'glslc_capture'))]
+    todo = [v for v, d in dirs.items() if not (glslc_done(d / 'glslc_capture') >= want if want else glslc_done(d / 'glslc_capture') or glslc_empty(d / 'glslc_capture'))]
     PROG.stage('GLSLC capture')
     if not todo:
         say(f'reusing the captured run-time shaders: {", ".join(str(d / "glslc_capture") for d in dirs.values())}')
@@ -1174,6 +1187,11 @@ def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
     rc = boot_mac(host, patched, henv, rd, log, GLSLC_SECS, done)
     got = glslc_done(cap)
     if rc is not None and not (want and got >= want): host_stopped(log, rc, time.time() - t0)
+    if not got and not want and reached_frames(log):   # Crash Team Racing Nitro-Fueled: the engine hands the precompiled GLSLC outputs in its archives to the driver and compiles only data without the magic, here after the language select
+        say(f'[RED] the game reached its frame loop without compiling a shader at run time in this boot, which gives no input: shaders it compiles later in play (behind a menu) are not captured; a folder with the marker {GLSLC_NONE} stands for the capture')
+        cap.mkdir(parents=True, exist_ok=True); (cap / GLSLC_NONE).write_text('the game reached its frame loop and compiled no shader with glslcCompile in a boot without input\n')
+        swap_in(cap, d / 'glslc_capture'); rmtree(rd)
+        PROG.end('none'); return
     if not got or (want and not got >= want):
         PROG.end(ok=False)
         PROG.say(f'---- last lines of {log} ----\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=40)).rstrip('\n'))
