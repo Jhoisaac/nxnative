@@ -217,6 +217,11 @@ Under each game: the IPA's size, and "60 fps with 1.2.0" where the game runs at 
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/super-mario-party-jamboree.jpg" width="256" alt="Super Mario Party Jamboree"><br><sub><b><a href="dm/games/0100965017338000/README.md">Super Mario Party Jamboree</a></b></sub></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/cult-of-the-lamb.jpg" width="256" alt="Cult of the Lamb"><br><sub><b><a href="dm/games/01002E7016C46000/README.md">Cult of the Lamb</a></b></sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/images/crash-team-racing-nitro-fueled.jpg" width="256" alt="Crash Team Racing Nitro-Fueled"><br><sub><b><a href="dm/games/0100F9F00C696000/README.md">Crash Team Racing Nitro-Fueled</a></b><br>60 fps upgrade</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><img src="docs/images/dragon-ball-z-kakarot.jpg" width="256" alt="DRAGON BALL Z: KAKAROT"><br><sub><b><a href="dm/games/010051C0134F8000/README.md">DRAGON BALL Z: KAKAROT</a></b></sub></td>
+<td></td>
 <td></td>
 </tr>
 </table>
