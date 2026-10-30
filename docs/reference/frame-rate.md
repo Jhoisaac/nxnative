@@ -97,11 +97,12 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 ### Unreal's fixed frame rate (`UEngine::FixedFrameRate`)
 
-- **Symptom:** an Unreal game stays at 30 fps although `t.MaxFPS` is 0 and the host already writes `rhi.SyncInterval` 1.
+- **Symptom:** an Unreal game stays at 30 fps (always, or only in its cinematics) although the host already writes `t.MaxFPS` and `rhi.SyncInterval` for 60.
 - **Cause:** the cap is the engine's fixed frame rate: `bUseFixedFrameRate=True` and `FixedFrameRate=30` under `[/Script/Engine.Engine]` of `DefaultEngine.ini`, so `UEngine` steps 1/30 s a frame and waits for it.
 - **Fix:** a `hle_fpslock.c` row that follows the pointer (`[GEngine] + offset`, `FPS_F32`), gated by the build; the game may write the value back at each load, which the row's per-present check covers. To find the field: read the configs in the pak first (`uepak.py` lists them); the property's reflection parameters hold its name, flags and offset (the string `FixedFrameRate` leads to them), and `GEngine` is the global the engine's init stores the new `UEngine` in.
 - **Check:** a fixed frame rate makes the delta time 1/fps, so logic that follows time keeps its speed; logic that counts frames would run twice as fast, so play a battle before calling it done.
 - **Found on:** [Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2](../../dm/games/0100AD80208A8000/README.md) (offset 0xaf8, `bUseFixedFrameRate` a bit of +0xaf4).
+- **Also found on:** [DRAGON BALL Z: KAKAROT](../../dm/games/010051C0134F8000/README.md#frame-rate) (GEngine `main+0x9d02558`, offset 0x814, `bUseFixedFrameRate` bit 0x40 of +0x810): its config says `bUseFixedFrameRate=False`, but the game turns the fixed rate on with 30 for every cinematic and clears it afterwards, so only the cutscenes stayed at 30. The host logs only the first 8 writes of a row, so a log with no later lines does not mean the writes stopped.
 
 ## Present interval and display rate
 
