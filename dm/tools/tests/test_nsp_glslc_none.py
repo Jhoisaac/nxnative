@@ -1,5 +1,6 @@
-"""NSP script: capture_glslc for a game that compiles no shader before its frame loop (Crash Team Racing Nitro-Fueled hands the precompiled GLSLC outputs in its archives to the driver and compiles two
-only after its language select). A boot that reaches the frame loop and captures nothing, for a profile that names no wanted files, is not an error (a red line): the folder holds the marker and a later build reuses it; a host that stopped before the frame loop, or a
+"""NSP script: capture_glslc for a game that compiles no shader before its frame loop (Crash Team Racing Nitro-Fueled hands the precompiled GLSLC outputs in its archives to the driver and compiles two,
+its Bink movie shaders, only when its first movie starts after the language select). The boot presses A once the frame loop is reached, and a profile that names no file stops once no new output
+came for GLSLC_QUIET_SECS. A boot that reaches the frame loop and captures nothing, for a profile that names no wanted files, is not an error (a red line): the folder holds the marker and a later build reuses it; a host that stopped before the frame loop, or a
 profile that names files, still fails. The host is not built or booted (build_mac_host and boot_mac are replaced); temporary files only."""
 import contextlib
 import importlib.util
@@ -46,6 +47,28 @@ class Capture(unittest.TestCase):
 
     def test_no_frames_fails(self):
         with self.assertRaises(nsp.BuildError): self.run_capture('[dm] [nvn] frame step: hold 1\nsegfault\n')
+        self.assertFalse(nsp.glslc_empty(self.d / 'glslc_capture'))
+
+    def test_presses_and_quiet(self):   # once the frame loop is reached the boot presses A (DM_CTL), and a profile that names no file stops GLSLC_QUIET_SECS after its last new output (Crash Team Racing Nitro-Fueled's Bink movie shaders)
+        out = bytearray(0x48); out[:4] = b'\x91\x68\x86\x19'; out[0x44:0x48] = (0x48).to_bytes(4, 'little')
+        clock, seen = [1000.0], {}
+        def boot(host, patched, henv, rd, logp, secs, done):
+            ctl, cap = Path(henv['DM_CTL']), Path(henv['DM_GLSLC_CAPTURE'])
+            Path(logp).write_text('[dm] [nvn] frame 300: 5 functions 90 calls\n')
+            self.assertFalse(done())
+            seen['presses'] = ctl.read_text().count('A~0.3\n')
+            cap.mkdir(parents=True, exist_ok=True); (cap / '05716fdaa771c310.glslc').write_bytes(bytes(out))
+            clock[0] += nsp.GLSLC_PRESS_SECS; self.assertFalse(done())   # a new output: the quiet time starts again
+            clock[0] += nsp.GLSLC_QUIET_SECS - 1; self.assertFalse(done())
+            clock[0] += 1; self.assertTrue(done())
+            seen['total'] = ctl.read_text().count('A~0.3\n')
+            return None
+        g = mock.Mock(); g.table.return_value = self.tmp / 'no_shader_map.tsv'
+        with mock.patch.object(nsp, 'boot_mac', side_effect=boot), mock.patch.object(nsp, 'glslc_wanted', return_value=None), mock.patch.object(nsp.time, 'time', side_effect=lambda: clock[0]):
+            nsp.capture_glslc(self.tmp, {'v1': self.d}, 'v1', 'patched', self.work, {}, self.logs, g)
+        self.assertEqual(seen['presses'], 1)
+        self.assertGreater(seen['total'], 1)
+        self.assertEqual(nsp.glslc_done(self.d / 'glslc_capture'), {'05716fdaa771c310.glslc'})
         self.assertFalse(nsp.glslc_empty(self.d / 'glslc_capture'))
 
     def test_wanted_files_fail(self):
