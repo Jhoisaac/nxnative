@@ -44,6 +44,7 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** resolve a presentation cap from the launcher environment or profile when no frame-step page exists. Use it for the present interval and display-link target without enabling frame-step logic. Existing state-page, movie and game-override behavior keeps precedence; target zero retains the profile's interval semantics.
 - **Check:** `t_nvn` verifies literal 33,333,333 / 16,666,666 ns periods for 30 / 60, display-link targets, disabled frame-step logic for native engines, target zero and movie/state-page precedence. All 134 NVN checks pass with Metal validation.
 - **Found on:** [NieR:Automata iPhone controls](../../dm/games/010056B015FE8000/README.md#iphone-resolution-and-frame-rate-controls).
+- **Also found on:** [Crash™ Team Racing Nitro-Fueled](../../dm/games/0100F9F00C696000/README.md#frame-rate): `fps_target 60` with `present_interval display` and no stub or memory write offers the 30 / 60 choice in the Mac settings window; the 30 cap has not been run on the game yet.
 
 ### Resolution policy is independent of the frame-rate cap
 

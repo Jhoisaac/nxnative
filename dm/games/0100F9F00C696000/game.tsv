@@ -1,0 +1,49 @@
+# Crash Team Racing Nitro-Fueled: Vicarious Visions' Alchemy engine (Beenox's port), SDK 8, NVN, Bink movies; update 1.0.15 (v983040) with its seven DLC.
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (its README.md); not tried on the iPhone
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	0100F9F00C696000
+program_id	0100F9F00C696000
+
+# ---- App ----
+name	Crash™ Team Racing Nitro-Fueled
+ipa	CrashTeamRacingNitroFueled.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v983040	1.0.15	main=1c689518406930512c13ddf4217e7676	subsdk0=c8a3cc0b1d1858330a881c0c2fc87940	sdk=3ae34e689d7a35f13cbf42bfd672af8b
+package	v983040
+shader_versions	v983040
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	archives/update.pak
+zip_store	.bk2:.pak:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/archives/=archives /ghosts/=ghosts /dlog/=dlog
+shader_note	Crash™ Team Racing Nitro-Fueled shaders (provisional profile)
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x7000000
+
+# ---- Frame rate ----
+# The 30 fps cap is the present interval 2 the game sets (igVideoFormat+0x18 → nvnWindowBuilderSetPresentInterval in igNxGraphicsDevice::activate, main+0x15a8a5c); game time
+# is wall-clock delta based (CClock::update, main+0xa00b90; Havok steps with that delta), so one frame per display tick gives 60 fps at the right speed: race timer 58.12 s
+# against 58.115 s of wall clock, the karts at the same place after 58 s as at 30 fps (headless, 1.0.15)
+present_interval	display
+# 60 fps on the Mac, 30 selectable in the launcher: with present_interval display the host presents one frame per display tick, or one per two at the 30 cap (DM_FPS_TARGET), and the
+# game, which steps by wall-clock time, keeps its speed. No rewriter stub or memory write is involved: the key only sets the cap the presentation follows (hle_nvn.c fps_present_cap)
+fps_target	60
