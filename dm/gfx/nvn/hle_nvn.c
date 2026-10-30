@@ -581,10 +581,11 @@ NVN(nvnSamplerFinalize, void, NVNsampler *s) { ((samp_t *)s)->magic = 0; }
 NVN(nvnProgramInitialize, NVNboolean, NVNprogram *p, NVNdevice *d) {
     (void)d; memset(p, 0, sizeof(prog_t)); ((prog_t *)p)->magic = MAGIC('P', 'R', 'O', 'G'); return 1;
 }
-static void pk_drop(const void *p);
-NVN(nvnProgramFinalize, void, NVNprogram *p) { mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p); }
-// a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed)
-typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
+static void pk_finalize(const void *p);
+NVN(nvnProgramFinalize, void, NVNprogram *p) { mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_finalize(p); }
+// a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed, bit i of lazy = computed at the first draw);
+// ctl[i]: the host's copy of stage i's control section while its key waits for the first draw (the game's control section is only valid during nvnProgramSetShaders)
+typedef struct { uint8_t key[6][8]; uint8_t ok, lazy; void *ctl[6]; } prog_keys_t;
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
 static prog_keys_t *pk_get(const void *p, int make) {
     pthread_mutex_lock(&g_pk_mu);
@@ -594,10 +595,13 @@ static prog_keys_t *pk_get(const void *p, int make) {
     pthread_mutex_unlock(&g_pk_mu);
     return k;
 }
-static void pk_drop(const void *p) {
+// A finalized program keeps its keys: a command recorded before the finalize can still bind it (Crash Team Racing Nitro-Fueled releases its Bink movie programs and replays a draw
+// with one about 20 s later; on the GPU the bound code stays in memory). Recomputed at the first draw instead, a key hashed the game's freed control section: a different unmapped key
+// each session, and the draw was skipped. Only the control copies go; nvnProgramInitialize / SetShaders on the same address replace the keys
+static void pk_finalize(const void *p) {
     pthread_mutex_lock(&g_pk_mu);
     prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, p) : NULL;
-    if (k) { CFDictionaryRemoveValue(g_pk, p); free(k); }
+    if (k) for (int i = 0; i < 6; i++) { free(k->ctl[i]); k->ctl[i] = NULL; }
     pthread_mutex_unlock(&g_pk_mu);
 }
 // mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
@@ -616,10 +620,22 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
     return 1;
 }
+int prog_key_lazy(const prog_t *p, unsigned st) { prog_keys_t *k = pk_get(p, 0); return k && st < 6 && (k->lazy >> st & 1); }
+// the stage's control section as the host can read it now: the copy made at SetShaders when the key waited for the first draw, else the program's pointer (the game's, or DM_NVN_SHDUMP's copy)
+const void *prog_ctl(const prog_t *p, unsigned st) { prog_keys_t *k = pk_get(p, 0); return k && st < 6 && k->ctl[st] ? k->ctl[st] : p->sd[st].control; }
+// 1 when the stage's code area (length from its control section) is in a registered memory pool now
+int prog_code_mapped(const prog_t *p, unsigned st) {
+    const uint8_t *c = prog_ctl(p, st); uint32_t n = 0; void *mb; uint64_t mo;
+    if (!c || !p->sd[st].data) return 0;
+    memcpy(&n, c + 0x704, 4); return n && n < (1u << 24) && mtl_addr(p->sd[st].data, n, &mb, &mo);
+}
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     if (st >= p->nstage) return 0;
     prog_keys_t *k = pk_get(p, 1);
-    if (!(k->ok >> st & 1)) { keys_hash(&p->sd[st], 0, k->key[st]); k->ok |= (uint8_t)(1u << st); }
+    if (!(k->ok >> st & 1)) {   // the code area was not in a memory pool at SetShaders: hash the control section copied then with the code area as it is now
+        NVNshaderData sd = p->sd[st]; if (k->ctl[st]) sd.control = k->ctl[st];
+        keys_hash(&sd, 0, k->key[st]); k->ok |= (uint8_t)(1u << st); k->lazy |= (uint8_t)(1u << st);
+    }
     memcpy(key, k->key[st], 8);
     return 1;
 }
@@ -632,9 +648,11 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     static const char *trace; static int trace_init;
     if (!trace_init) { trace = getenv("DM_NVN_PROGTRACE"); trace_init = 1; }
     prog_keys_t *k = pk_get(p, 1);
-    k->ok = 0;
+    k->ok = 0; k->lazy = 0;
+    for (int i = 0; i < 6; i++) { free(k->ctl[i]); k->ctl[i] = NULL; }
     for (int i = 0; i < n; i++) {
         if (keys_hash(&sd[i], 1, k->key[i])) k->ok |= (uint8_t)(1u << i);
+        else if (sd[i].control && (k->ctl[i] = malloc(0x880))) memcpy(k->ctl[i], sd[i].control, 0x880);   // the key is computed at the first draw (prog_key), from this copy
         // Diagnostic: trace the loader of selected shader keys (comma-separated hex).
         if (trace && (k->ok & (1u << i))) {
             char key[17]; for (int j = 0; j < 8; j++) snprintf(key + j * 2, 3, "%02x", k->key[i][j]);
