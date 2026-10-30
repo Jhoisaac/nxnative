@@ -9,7 +9,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | yes |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | yes |
 | [Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2](#demon-slayer--kimetsu-no-yaiba--the-hinokami-chronicles-2) | 0 | 0 | 0 | 0 | 3 |  |
-| [DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET](#dragon-ball-z-kakarot--a-new-power-awakens-set) | 0 | 0 | 0 | 0 | 2 |  |
+| [DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET](#dragon-ball-z-kakarot--a-new-power-awakens-set) | 0 | 0 | 0 | 0 | 3 |  |
 | [DRAGON QUEST VII Reimagined](#dragon-quest-vii-reimagined) | 1 | 1 | 0 | 0 | 3 | yes |
 | [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](#dragon-quest-xi-s-echoes-of-an-elusive-age--definitive-edition) | 0 | 0 | 0 | 0 | 2 |  |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](#final-fantasy-crystal-chronicles-remastered-edition) | 8 | 0 | 0 | 0 | 0 | yes |
@@ -192,6 +192,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 - **1.70 `main`** `e99dffa3…`
   - host [hle_fpslock.c:71](../../dm/host/hle_fpslock.c#L71): engine frame limit set to fps_target: Unreal t.MaxFPS
   - host [hle_fpslock.c:72](../../dm/host/hle_fpslock.c#L72): engine frame limit set to fps_target: Unreal rhi.SyncInterval
+  - host [hle_fpslock.c:76](../../dm/host/hle_fpslock.c#L76): engine frame limit set to fps_target: Unreal UEngine::FixedFrameRate
 
 ### DRAGON QUEST VII Reimagined
 
@@ -308,7 +309,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), `0100DCA0064A6000`.
 
 - **1.4.0 `main`** `79e5950f…`
-  - host [hle_fpslock.c:76](../../dm/host/hle_fpslock.c#L76): engine frame limit set to fps_target: NLG frame limiter target
+  - host [hle_fpslock.c:80](../../dm/host/hle_fpslock.c#L80): engine frame limit set to fps_target: NLG frame limiter target
 
 ### Mario + Rabbids Kingdom Battle
 
@@ -362,7 +363,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:92](../../dm/host/hle_fpslock.c#L92): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:96](../../dm/host/hle_fpslock.c#L96): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -380,7 +381,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:93](../../dm/host/hle_fpslock.c#L93): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:97](../../dm/host/hle_fpslock.c#L97): frame interval and dynamic-resolution floor
 
 ### OCTOPATH TRAVELER 0
 
@@ -672,7 +673,7 @@ Applied to the `sdk` of any build without CUTS whose profile was not brought up 
 
 Dead code unless such a build is run; a candidate for removal, or for a build row in its profile.
 
-- `992787e2…`: [hle_fpslock.c:144](../../dm/host/hle_fpslock.c#L144): build check (a build no profile registers)
+- `992787e2…`: [hle_fpslock.c:148](../../dm/host/hle_fpslock.c#L148): build check (a build no profile registers)
 
 ## Translator rules keyed by a shader's code
 

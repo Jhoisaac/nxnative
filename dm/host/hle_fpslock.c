@@ -66,10 +66,14 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
     { "0a4f14a5c12f470a4d3168a8f2ae6005", "Unreal Project.FrameRateLimit", 0x6d6d5d0 + 0x10, 0, FPS_F32, 2 },
     { "0a4f14a5c12f470a4d3168a8f2ae6005", "Unreal rhi.SyncInterval", 0x796de10 + 0x10, 0, VSYNCS_I32, 2 },
     // DRAGON BALL Z: KAKAROT 1.70 (v1048576): Unreal Engine 4.2x's t.MaxFPS and rhi.SyncInterval, the same layout (names in UTF-16). Its DefaultEngine.ini has bUseFixedFrameRate=False,
-    // bSmoothFrameRate=True (40-60) and rhi.SyncInterval=2, so the cap is the present interval alone. Registered at main+0x3e8ee78 (t.MaxFPS: float, default 0, vtable slot 2; AsVariableFloat
+    // bSmoothFrameRate=True (40-60) and rhi.SyncInterval=2, so in play the cap is the present interval alone. Registered at main+0x3e8ee78 (t.MaxFPS: float, default 0, vtable slot 2; AsVariableFloat
     // stored at main+0x9d02df8+0x10) and main+0x2a2699c (rhi.SyncInterval: int, default 1, slot 1; AsVariableInt stored at main+0x9c0a080+0x10)
     { "e99dffa39354b6068f8e7c984c77bc84", "Unreal t.MaxFPS", 0x9d02df8 + 0x10, 0, FPS_F32, 2 },
     { "e99dffa39354b6068f8e7c984c77bc84", "Unreal rhi.SyncInterval", 0x9c0a080 + 0x10, 0, VSYNCS_I32, 2 },
+    // ... and for every cinematic (its movies included) the game turns the engine's fixed frame rate on with FixedFrameRate 30 (main+0xdde930: +0x814 = 30, bit 0x40 of +0x810,
+    // and t.MaxFPS 30 through the engine's max-FPS setter; main+0xddb490 clears it), which held cutscenes at 30 with the rows above applied. GEngine is main+0x9d02558; the field
+    // offsets come from the reflection records at main+0x8cfbcd0 (FixedFrameRate, +0x814) and main+0x8cfbcf8 (bUseFixedFrameRate, SetBit main+0x3fb03a0: +0x810 bit 0x40)
+    { "e99dffa39354b6068f8e7c984c77bc84", "Unreal UEngine::FixedFrameRate", 0x9d02558, 0x814, FPS_F32, 1 },
     // Luigi's Mansion 3 1.4.0: Next Level Games' frame limiter. At the end of each frame the main thread calls the frame callbacks (main+0xb7c308) with the milliseconds since the frame
     // started; the limiter (main+0x7a3e70) runs jobs or sleeps until 33.333 ms have passed, the float at main+0x13c94dc (read only there, at main+0x7a3ea8 and main+0x7a3f18), and the game
     // steps by the time that really passed. The game asks for present interval 2 too, which the profile's present_interval display ignores; both are needed
