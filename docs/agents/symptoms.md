@@ -93,6 +93,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - the iPhone app is killed for memory; resident memory grows steadily (about 0.2 MB a frame) while the residency set and the texture counts stay flat. → [Deferred-release drain without an autorelease pool](../reference/memory.md#deferred-release-drain-without-an-autorelease-pool)
 - travelling produces a brief multi-GB footprint spike, then memory returns to its earlier level; periodic memory lines can miss the peak. Upload diagnostics show many swapped-out blocks still alive in one batch. → [Upload staging grows within one rendering submission](../reference/memory.md#upload-staging-grows-within-one-rendering-submission)
 - GPU memory grows with repeated `nvnTextureReadTexels` calls on a long-lived game thread, even after each readback completes. → [GPU readback without an autorelease pool](../reference/memory.md#gpu-readback-without-an-autorelease-pool)
+- the memory readout line (`[nvn-mtl] memory up to frame N: resident …`, the task's footprint) is several GB before the first frame of play and stays there: Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 started at 8.4 GB and reached 12.2 GB in a 67-minute session on an M4 Pro (other games start at 1.7–4.3 GB), too much for a 16 GB Mac. `vmmap` shows it as `Malloc Large`. → [Pipeline archive files read into memory](../reference/memory.md#pipeline-archive-files-read-into-memory)
 
 ## Threads
 

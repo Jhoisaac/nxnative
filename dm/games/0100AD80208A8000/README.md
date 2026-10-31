@@ -18,7 +18,7 @@ Status: brought up on the Mac: the title, the story mode's chapter map and its b
 
 ## Memory
 
-About 4.3 GB resident and 2.1 GB of Metal allocations in battle.
+About 2.7 GB footprint at start and 4.8 GB in battle (headless, one-minute battle on Claro de la roca, the user's state with its 3.0 GB device archive and the app's 2.6 GB pipeline archive; Metal allocations 1.8 GB of it), current. Before the archive files were opened mapped it was 8.3 GB and 10.5 GB on the same route, and 8.4 GB rising to 12.2 GB in a player's 67-minute session ([Pipeline archive files read into memory](../../../docs/reference/memory.md#pipeline-archive-files-read-into-memory)).
 
 ## Rendering
 
@@ -44,6 +44,7 @@ General changes first needed here; each applies to every game:
 - **Shader map pairs** (`uepak.py` `ue5_shader_maps`, `shader_split.py` `ue_map_pairs`, current): the profile's `pso_pairs.tsv` (95,317 rows) comes from the shader maps of the 11 containers and the global cache, so the prebuild and vertex output padding use the real pairs; the key `ue_pair_skip_pipelines` names the velocity pipeline, open ([Unreal Engine 5 shader maps give the real vertex / pixel pairs](../../../docs/reference/shaders.md#unreal-engine-5-shader-maps-give-the-real-vertex--pixel-pairs)).
 - **The depth mode for the bases made before the game runs** (`depth_mode zero` in `game.tsv`, current): the game sets near = 0, and the NSP script's prebuild and the app's offline archive were made for near = −w, so no draw found them and the host built every base again (the app log said `the game's depth mode is not the one built for`). With the key the app's archive is stamped `depth near=0`.
 - **metal-tt's stack on a large archive** (`pso_offline.py` `big_stack`): with the pairs decoded from its Unreal shader maps (108,611 bases) the offline archive build overflowed `air-nt`'s 8 MB main thread stack after 36 minutes; `metal-tt` now runs with the hard limit, 64 MB ([metal-tt's backend overflows its stack on a large archive](../../../docs/reference/shaders.md#metal-tts-backend-overflows-its-stack-on-a-large-archive)).
+- **Pipeline archive files mapped** (`nvn_mtl.m` `arch_open`, unit test `t_pso_archive`): Metal read every archive file into memory it kept, 5.8 GB of this game's footprint ([Pipeline archive files read into memory](../../../docs/reference/memory.md#pipeline-archive-files-read-into-memory)).
 
 ## Open
 
