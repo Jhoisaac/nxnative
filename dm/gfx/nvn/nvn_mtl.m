@@ -4855,6 +4855,7 @@ enum { VC_RGN = 1 << 16 };   // bits of the region filter
 typedef struct { uint64_t ibuf; int32_t count, itype; } ir_key;
 typedef struct { uint32_t mn, mx; uint64_t stamp, seen, lo, n; const void *span; int gpuw; } ir_ent;   // gpuw: a GPU write was queued on the indices: never trusted again
 static nvn_hmap g_ir = {.klen = sizeof(ir_key)};
+static uint64_t g_vcg_runs, g_vcg_verts, g_vcg_cpu;   // conversion draws, their vertices, ranges the CPU converted
 static uint64_t g_vc_rgn[VC_RGN / 64], g_vc_stat, g_vc_conv, g_vc_whole, g_vc_checks, g_vc_bad;   // g_vc_rgn: 1 MB regions holding a kept index range (hashed); g_vc_conv / g_vc_whole: vertices converted / in the bound ranges
 static int vc_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_VCONV_RANGE"); v = e && *e ? atoi(e) != 0 : DM_GAME_VCONV_RANGE; MLOG("vertex conversion of the draw's vertices only: %s", v ? "on" : "off"); } return v; }
 static int vc_check(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_VCONV_CHECK"); v = e && *e && atoi(e); } return v; }
@@ -4900,15 +4901,115 @@ static int vc_draw_range(const p_draw *dw, const p_draw_idx *di, int64_t *lo, in
 }
 static void vc_stat(void) {   // every 3600 submissions
     if (g_sub_serial - g_vc_stat < 3600) return;
-    if (g_vc_stat) MLOG("vertex conversion: %.0f vertices per submission (the bound ranges: %.0f), %u index ranges kept%s; shadow-input libraries loaded %llu (not usable %llu), pipelines built with them %llu", g_vc_conv / 3600.0, g_vc_whole / 3600.0, g_ir.n,
+    if (g_vc_stat) MLOG("vertex conversion: %.0f vertices per submission (the bound ranges: %.0f), %u index ranges kept%s; shadow-input libraries loaded %llu (not usable %llu), pipelines built with them %llu; GPU conversions %llu (%llu vertices), on the CPU %llu", g_vc_conv / 3600.0, g_vc_whole / 3600.0, g_ir.n,
         vc_check() ? [NSString stringWithFormat:@"; checked %llu, %llu differed", (unsigned long long)g_vc_checks, (unsigned long long)g_vc_bad].UTF8String : "",
-        (unsigned long long)g_vin_loaded, (unsigned long long)g_vin_failed, (unsigned long long)g_vin_psos);
+        (unsigned long long)g_vin_loaded, (unsigned long long)g_vin_failed, (unsigned long long)g_vin_psos, (unsigned long long)g_vcg_runs, (unsigned long long)g_vcg_verts, (unsigned long long)g_vcg_cpu);
     g_vc_stat = g_sub_serial; g_vc_conv = g_vc_whole = 0;
 }
+// The same conversion on the GPU (DM_VCONV_GPU=0 keeps the CPU's). Metal cannot dispatch compute inside a render pass, and ending the pass for every conversion would store and reload its
+// attachments, so the conversion is a draw in the open pass: a vertex function with rasterization off (vconv_gpu_msl; the host's transform feedback and discard pipelines do the same)
+// reads each element from the guest vertex memory at its GPU address, byte by byte (a stream may start at any address), and writes the four 32-bit values vconv_fill writes into the
+// frame arena, where the draw's pipeline then reads them as before. A barrier between the vertex stages orders the writes before the draw's own vertex fetch. The helper draw has an
+// argument table of its own, as clr_tri does, so the shared table's bindings and the draw's pipeline come back unchanged. vconv_elem / vconv_fill stay the reference for every format
+// (t_vconv_gpu compares them byte for byte) and the fallback for what the GPU cannot serve: a slice-merged pass, vertex memory in no single memory pool, no pipeline
+static int vcg_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VCONV_GPU"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_VCONV_GPU=0: vertex attributes are converted on the CPU at replay"); } return v; }
+static const char k_vcg_msl[] =
+"#include <metal_stdlib>\nusing namespace metal;\n"
+"struct VJob { device const uchar *src; device uint4 *dst; uint stride, count, kind, n, bits, sgn, f, pad; };\n"   // = vcg_job; kind 0: 8 / 16-bit integers, 1: integers as floats, 2: float-type formats
+"static inline uint rd16(device const uchar *p) { return uint(p[0]) | uint(p[1]) << 8; }\n"
+"static inline uint rd32(device const uchar *p) { return uint(p[0]) | uint(p[1]) << 8 | uint(p[2]) << 16 | uint(p[3]) << 24; }\n"
+"static inline float uf(uint v, uint mb) {\n"   // unsigned small float of R11G11B10F, as vconv_uf
+"    uint e = v >> mb & 31u, m = v & ((1u << mb) - 1u);\n"
+"    if (e == 0u) return float(m) * as_type<float>((127u - 14u - mb) << 23);\n"
+"    if (e == 31u) return as_type<float>(m ? 0x7fc00000u : 0x7f800000u);\n"
+"    return as_type<float>(((e + 112u) << 23) | (m << (23u - mb))); }\n"
+"vertex void vconv(uint vid [[vertex_id]], constant VJob &j [[buffer(0)]]) {\n"
+"    if (vid >= j.count) return;\n"
+"    device const uchar *p = j.src + ulong(vid) * ulong(j.stride);\n"
+"    uint w[4] = { 0u, 0u, 0u, j.kind == 0u ? 1u : 0x3f800000u };\n"   // the missing components: (0, 0, 0, 1) as integers or as 1.0
+"    for (uint c = 0; c < j.n; c++) {\n"
+"        if (j.kind == 0u) { w[c] = j.bits == 8u ? (j.sgn ? uint(int(char(p[c]))) : uint(p[c])) : (j.sgn ? uint(int(short(rd16(p + 2u * c)))) : rd16(p + 2u * c)); }\n"
+"        else if (j.kind == 1u) {\n"
+"            float x;\n"
+"            if (j.bits == 8u) x = j.sgn ? float(int(char(p[c]))) : float(uint(p[c]));\n"
+"            else if (j.bits == 16u) x = j.sgn ? float(int(short(rd16(p + 2u * c)))) : float(rd16(p + 2u * c));\n"
+"            else x = j.sgn ? float(int(rd32(p + 4u * c))) : float(rd32(p + 4u * c));\n"
+"            w[c] = as_type<uint>(x); }\n"
+"        else {\n"
+"            float x = 0.0f; uint f = j.f;\n"
+"            if (f == 0x0Au || f == 0x16u || f == 0x22u) { w[c] = rd32(p + 4u * c); continue; }\n"
+"            if (f == 0x01u || f == 0x0Du || f == 0x19u || f == 0x25u) x = float(p[c]) / 255.0f;\n"
+"            else if (f == 0x02u || f == 0x0Eu || f == 0x1Au || f == 0x26u) x = max(float(int(char(p[c]))) / 127.0f, -1.0f);\n"
+"            else if (f == 0x05u || f == 0x11u || f == 0x1Du || f == 0x29u) x = float(as_type<half>(ushort(rd16(p + 2u * c))));\n"
+"            else if (f == 0x06u || f == 0x12u || f == 0x1Eu || f == 0x2Au) x = float(rd16(p + 2u * c)) / 65535.0f;\n"
+"            else if (f == 0x07u || f == 0x13u || f == 0x1Fu || f == 0x2Bu) x = max(float(int(short(rd16(p + 2u * c)))) / 32767.0f, -1.0f);\n"
+"            else if (f == 0x9Au) x = float(p[c == 3u ? 3u : 2u - c]) / 255.0f;\n"   // BGRA8 unorm: the fetch hands the shader R, G, B, A
+"            else if (f == 0x3Fu) { uint q = rd32(p); x = uf(c == 0u ? q & 0x7ffu : c == 1u ? q >> 11 & 0x7ffu : q >> 22, c == 2u ? 5u : 6u); }\n"
+"            else if (f == 0x3Du || f == 0x69u) {\n"
+"                uint q = rd32(p), bits = c == 3u ? 2u : 10u, v = q >> (10u * c) & ((1u << bits) - 1u);\n"
+"                if (f == 0x3Du) x = float(v) / float((1u << bits) - 1u);\n"
+"                else x = max(float(int(v << (32u - bits)) >> int(32u - bits)) / float((1u << (bits - 1u)) - 1u), -1.0f); }\n"
+"            w[c] = as_type<uint>(x); } }\n"
+"    j.dst[vid] = uint4(w[0], w[1], w[2], w[3]);\n"
+"}\n";
+typedef struct { uint64_t src, dst; uint32_t stride, count, kind, n, bits, sgn, f, pad; } vcg_job;
+_Static_assert(sizeof(vcg_job) == 48, "k_vcg_msl VJob");
+static id<MTLRenderPipelineState> vcg_pso(void) {   // for the open pass's attachment formats; nil: no pipeline (the CPU converts)
+    static NSMutableDictionary<NSData *, id<MTLRenderPipelineState>> *cache; static id<MTLFunction> fn; static int failed;
+    if (failed) return nil;
+    if (!cache) cache = [NSMutableDictionary dictionary];
+    struct { uint32_t cfmt[8], dfmt, sfmt, samples; } k; memcpy(k.cfmt, g_pass.cfmt, sizeof k.cfmt); k.dfmt = g_pass.dfmt; k.sfmt = g_pass.sfmt; k.samples = g_pass.samples ? g_pass.samples : 1;
+    NSData *kd = [NSData dataWithBytes:&k length:sizeof k]; id<MTLRenderPipelineState> ps = cache[kd]; if (ps) return ps;
+    NSError *e = nil;
+    if (!fn) {
+        MTLCompileOptions *o = [MTLCompileOptions new]; o.mathMode = MTLMathModeSafe;   // the divisions of the CPU's conversion round correctly
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_vcg_msl) options:o error:&e]; fn = lib ? [lib newFunctionWithName:@"vconv"] : nil;
+        if (!fn) { failed = 1; MLOG("[RED] vertex attribute GPU conversion: the library does not compile (%s); the CPU converts", e.localizedDescription.UTF8String); return nil; } }
+    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new]; d.vertexFunction = fn; d.rasterizationEnabled = NO; d.rasterSampleCount = k.samples;
+    for (int i = 0; i < 8; i++) if (k.cfmt[i]) { d.colorAttachments[i].pixelFormat = (MTLPixelFormat)k.cfmt[i]; d.colorAttachments[i].writeMask = MTLColorWriteMaskNone; }
+    d.depthAttachmentPixelFormat = (MTLPixelFormat)k.dfmt; d.stencilAttachmentPixelFormat = (MTLPixelFormat)k.sfmt;
+    ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
+    if (!ps) { static int n; if (n++ < 4) MLOG("[RED] vertex attribute GPU conversion: cannot create the pipeline (colour %u depth %u stencil %u samples %u): %s; the CPU converts in this pass", k.cfmt[0], k.dfmt, k.sfmt, k.samples, e.localizedDescription.UTF8String); return nil; }
+    cache[kd] = ps; return ps;
+}
+static id<MTL4ArgumentTable> vcg_table(void) {
+    static id<MTL4ArgumentTable> t; static int failed;
+    if (!t && !failed) { NSError *e = nil; MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; t = rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]);
+        if (!t) { failed = 1; MLOG("[RED] vertex attribute GPU conversion: cannot create the argument table (%s); the CPU converts", e.localizedDescription.UTF8String); } }
+    return t;
+}
+// The pass is switched to the helper pipeline and table (vcg_begin) for as many conversions as a draw needs and back (vcg_end, with the barrier). NULL: begun, else why the CPU converts
+static const char *vcg_begin(id<MTL4RenderCommandEncoder> en) {
+    if (!vcg_on()) return "DM_VCONV_GPU=0";
+    if (g_sm_pass) return "slice-merged pass";
+    id<MTLRenderPipelineState> ps = vcg_pso(); id<MTL4ArgumentTable> t = ps ? vcg_table() : nil; if (!t) return "no helper pipeline";
+    enc_r_pso(en, ps); [en setArgumentTable:t atStages:MTLRenderStageVertex]; return NULL;
+}
+static void vcg_end(id<MTL4RenderCommandEncoder> en, int ran) {
+    if (ran) [(id<MTL4CommandEncoder>)en barrierAfterEncoderStages:MTLStageVertex beforeEncoderStages:MTLStageVertex visibilityOptions:resource_vis()];   // the writes before every later vertex fetch
+    [en setArgumentTable:g_vt atStages:MTLRenderStageVertex];
+    if (g_enc_pso) enc_r_pso(en, g_enc_pso);   // the draw's own pipeline, set before vconv_bind
+}
+// One conversion: nv elements of format f from guest address addr (stride apart) into the frame arena (*gpu); NULL on success, else why not (nothing encoded)
+static const char *vcg_encode(id<MTL4RenderCommandEncoder> en, int f, uint64_t addr, uint32_t stride, uint64_t nv, uint64_t *gpu) {
+    void *mb; uint64_t mo, src; int ib, is;
+    if (!mtl_gpu_addr(addr, (nv - 1) * stride + (uint64_t)vconv_size(f), &mb, &mo, &src)) return "vertex memory in no single memory pool";
+    vcg_job j = { src, 0, stride, (uint32_t)nv, 0, 0, 0, 0, (uint32_t)f, 0 };
+    if ((j.n = (uint32_t)vconv_int(f, &ib, &is))) { j.kind = 0; j.bits = (uint32_t)ib; j.sgn = (uint32_t)is; }
+    else if ((j.n = (uint32_t)vconv_i2f(f, &ib, &is))) { j.kind = 1; j.bits = (uint32_t)ib; j.sgn = (uint32_t)is; }
+    else if ((j.n = (uint32_t)vconv_ncomp(f))) j.kind = 2;
+    else return "format not handled";
+    id<MTLBuffer> b; size_t o = arena_alloc((size_t)nv * 16 + sizeof j, &b); j.dst = b.gpuAddress + o;
+    memcpy((uint8_t *)b.contents + o + nv * 16, &j, sizeof j);   // the job follows the elements
+    [vcg_table() setAddress:j.dst + nv * 16 atIndex:0];
+    enc_r_draw(en, MTLPrimitiveTypePoint, 0, (NSUInteger)nv);
+    g_vcg_runs++; g_vcg_verts += nv; *gpu = j.dst; return NULL;
+}
 // Per submission, one conversion per (range, format, layout): KTGL draws the same mesh several times a frame (depth, shadow, G-buffer)
-static struct { uint64_t addr, size, serial, v0, nv; uint32_t fmt, off, stride; uint64_t gpu; } g_vconv[64]; static int g_vconv_next;
+static struct { uint64_t addr, size, serial, v0, nv; uint32_t fmt, off, stride; uint64_t gpu, ep, we; } g_vconv[64]; static int g_vconv_next;   // ep, we: for a GPU conversion, the buffer write epochs it was made at (0: made on the CPU)
 static void vconv_bind(id<MTL4RenderCommandEncoder> en, NvShader *vs, int tf, const p_draw *dw, const p_draw_idx *di) {   // tf: a transform feedback capture (no shadow inputs)
-    const nvn_refl *rf = &vs->rf; int slot = VCONV_SLOT0, vc = vc_on(), rk = -1, on = vin_on(vs, NULL, tf); int64_t rlo = 0, rhi = 0;   // rk: the draw's vertex range is known (-1 = not looked up yet)
+    const nvn_refl *rf = &vs->rf; int slot = VCONV_SLOT0, vc = vc_on(), rk = -1, on = vin_on(vs, NULL, tf), gpu_open = 0; int64_t rlo = 0, rhi = 0; const char *gwhy = NULL; uint64_t runs0 = g_vcg_runs;   // rk: the draw's vertex range is known (-1 = not looked up yet)
+    struct { NSUInteger slot; uint64_t gpu; } bind[VCONV_MAX]; int nb = 0;   // bound once the GPU conversions are done (vcg_end switches the table back)
     vc_stat();
     for (int v = 0; v < rf->nv && slot < VCONV_SLOT0 + VCONV_MAX; v++) {
         if (!vconv_wanted(rf, v, NULL, on) || rf->v[v].nvn >= S.nattr) continue;
@@ -4920,22 +5021,31 @@ static void vconv_bind(id<MTL4RenderCommandEncoder> en, NvShader *vs, int tf, co
             int64_t a0 = rlo < 0 ? 0 : rlo, a1 = rhi < (int64_t)nv - 1 ? rhi : (int64_t)nv - 1;
             if (rk && a0 <= a1) { v0 = (uint64_t)a0; nv = (uint64_t)(a1 - a0 + 1); }
         }
-        for (int i = 0; i < 64 && !gpu; i++) if (g_vconv[i].serial == g_sub_serial && g_vconv[i].addr == addr && g_vconv[i].size == size && g_vconv[i].v0 == v0 && g_vconv[i].nv == nv && g_vconv[i].fmt == (uint32_t)f && g_vconv[i].off == off && g_vconv[i].stride == stride) gpu = g_vconv[i].gpu;
+        for (int i = 0; i < 64 && !gpu; i++) if (g_vconv[i].serial == g_sub_serial && g_vconv[i].addr == addr && g_vconv[i].size == size && g_vconv[i].v0 == v0 && g_vconv[i].nv == nv && g_vconv[i].fmt == (uint32_t)f && g_vconv[i].off == off && g_vconv[i].stride == stride
+                                                  && (!g_vconv[i].ep || (g_vconv[i].ep == g_wr_epoch + 1 && g_vconv[i].we == g_vbuf_write_epoch))) gpu = g_vconv[i].gpu;   // a GPU conversion read the memory as it was then
         if (!gpu && addr) {
             if (nv && nv * 16 <= (4u << 20)) {
-                id<MTLBuffer> b; size_t o = arena_alloc((size_t)nv * 16, &b); vconv_fill(f, addr + off + v0 * stride, stride, nv, (float *)((uint8_t *)b.contents + o)); gpu = b.gpuAddress + o;
+                int ib, is; uint64_t src = addr + off + v0 * stride; const char *why = gwhy;   // gwhy: why the GPU path did not begin for this draw
+                if (!gpu_open) { gwhy = why = vcg_begin(en); gpu_open = why ? -1 : 1; }
+                if (!why) why = vcg_encode(en, f, src, stride, nv, &gpu);
+                if (why) {   // the CPU converts
+                    id<MTLBuffer> b; size_t o = arena_alloc((size_t)nv * 16, &b); vconv_fill(f, src, stride, nv, (float *)((uint8_t *)b.contents + o)); gpu = b.gpuAddress + o; g_vcg_cpu++; }
                 g_vc_conv += nv; g_vc_whole += whole;
                 int c = g_vconv_next++ % 64; g_vconv[c].addr = addr; g_vconv[c].size = size; g_vconv[c].v0 = v0; g_vconv[c].nv = nv; g_vconv[c].serial = g_sub_serial; g_vconv[c].fmt = (uint32_t)f; g_vconv[c].off = off; g_vconv[c].stride = stride; g_vconv[c].gpu = gpu;
-                int ib, is;
-                if (vconv_i2f(f, &ib, &is)) { static int once; if (!once++) MLOG("vertex attribute format %#x (integers read as floats, which Metal has no vertex format for): converted on the CPU at replay and bound separately", f); }
-                else if (rf->v[v].ct == NVN_CT_FLOAT) RED_ONCE(99, "vertex attribute format %#x (8 / 16-bit integer) feeds a float input: the 32-bit register values Maxwell's fetch makes are bound as float bit patterns, converted on the CPU at replay", f);
-                else if (vconv_ncomp(f)) RED_ONCE(89, "vertex attribute format %#x feeds an integer input: converted to float32 bit patterns on the CPU at replay and bound separately (the conversion Maxwell does on vertex fetch)", f);
-                else RED_ONCE(96, "vertex attribute format %#x (8 / 16-bit integer) feeds an integer input of the opposite signedness: extended to 32 bits with the format's own signedness on the CPU at replay and bound separately", f);
+                g_vconv[c].ep = why ? 0 : g_wr_epoch + 1; g_vconv[c].we = g_vbuf_write_epoch;
+                static int once; if (!why && !once++) MLOG("vertex attribute format %#x (and others Metal's vertex fetch does not convert as the shader expects): converted on the GPU, by a vertex function in the open pass; DM_VCONV_GPU=0 converts them on the CPU at replay", f);
+                if (!why) {}
+                else if (vconv_i2f(f, &ib, &is)) { static int once2; if (!once2++) MLOG("vertex attribute format %#x (integers read as floats, which Metal has no vertex format for): converted on the CPU at replay (%s) and bound separately", f, why); }
+                else if (rf->v[v].ct == NVN_CT_FLOAT) RED_ONCE(99, "vertex attribute format %#x (8 / 16-bit integer) feeds a float input: the 32-bit register values Maxwell's fetch makes are bound as float bit patterns, converted on the CPU at replay (%s)", f, why);
+                else if (vconv_ncomp(f)) RED_ONCE(89, "vertex attribute format %#x feeds an integer input: converted to float32 bit patterns on the CPU at replay (%s) and bound separately (the conversion Maxwell does on vertex fetch)", f, why);
+                else RED_ONCE(96, "vertex attribute format %#x (8 / 16-bit integer) feeds an integer input of the opposite signedness: extended to 32 bits with the format's own signedness on the CPU at replay (%s) and bound separately", f, why);
             } else if (nv) RED_ONCE(90, "vertex attribute conversion: a range of %llu vertices exceeds the per-frame staging (format %#x)", (unsigned long long)nv, f);
         }
-        if (gpu) enc_r_vbuf(en, (NSUInteger)slot, gpu - v0 * 16);   // vertex id v0 reads the first converted element
+        if (gpu) { bind[nb].slot = (NSUInteger)slot; bind[nb++].gpu = gpu - v0 * 16; }   // vertex id v0 reads the first converted element
         slot++;
     }
+    if (gpu_open > 0) vcg_end(en, g_vcg_runs != runs0);
+    for (int i = 0; i < nb; i++) enc_r_vbuf(en, bind[i].slot, bind[i].gpu);
 }
 static MTLVertexFormat vfmt(int f) {
     switch (f) {
