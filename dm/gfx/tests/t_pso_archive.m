@@ -1,6 +1,6 @@
 // Metal 4 pipelines (pso_build): one base per pipeline with its colour state unspecialized, made into pipelines by specialization, kept in the pipeline archive.
 // Checks: pipelines that differ only in colour state share one base; a specialized pipeline draws the same pixels as one built through the MTLDevice; a flushed archive
-// file serves the base again without compiling; a flush of bases without a vertex layout is a p<seq> file, where a base with a layout is not looked up; a function with no
+// file, opened mapped rather than read into memory, serves the base again without compiling; a flush of bases without a vertex layout is a p<seq> file, where a base with a layout is not looked up; a function with no
 // Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one despite a
 // mid-prewarm flush, and a compaction that did not finish is not tried again on the same system build; depth-only draws write depth; concurrent colour variants compile
 // one base; archive flushes preserve unrelated compiler state
@@ -297,7 +297,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     EXPECT("the flush began a new period", 1, g_ep != ep0);
     EXPECT("nothing left to write", 0, g_arch_new);
     nvn_hm_clear(&g_pbase, hm_rel);   // as a new start: no base in memory, the archive opened
-    g_arch4 = @[[g_dev newArchiveWithURL:[NSURL fileURLWithPath:file] error:&err]];
+    int mapped0 = g_arch_mapped_n; unsigned long long mbytes0 = g_arch_mapped_bytes;
+    g_arch4 = @[arch_open(file, &err)];
+    EXPECT("archive file opened mapped", mapped0 + 1, g_arch_mapped_n);
+    EXPECT("the whole file mapped", [[NSFileManager.defaultManager attributesOfItemAtPath:file error:nil] fileSize], g_arch_mapped_bytes - mbytes0);
+    EXPECT("mapping only within arch_open", 0, t_arch_map);
     uint64_t built = g_pb_built;
     same_pixels("from the archive: RGBA8 blended, RGBA16F", MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA16Float, MTLColorWriteMaskAll);
     EXPECT("base from the archive", 1, g_pb_archived);

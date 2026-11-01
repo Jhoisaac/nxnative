@@ -36,6 +36,10 @@
 # Unreal Engine 4.27 with bShareMaterialShaderCode off (OCTOPATH TRAVELER II: Majesty/Content/Paks/Majesty-Switch.pak, version 11, 3.3 GB / 376,601 files, index not encrypted, Zlib blocks)
 #   has no shader code archive at all: each material keeps its shaders in its own cooked package (.uexp) and the engine's global shaders are in Engine/GlobalShaderCache-SF_GLSL_SWITCH.bin,
 #   every shader an LSLG record stored without compression, as in a legacy pak (inline_shaders; shader_split.py ue_legacy_jobs reads them). Zlib and LZ4 blocks are decoded here (Pak.read).
+# Writing (write_pak, for dm/tools/ue_quality.py's replacement paks): version 11, nothing compressed or encrypted, the mount point given, one FPakEntry in front of each file's data, and the
+#   index with the encoded entries (bits 29-31 set: offset, raw size fit 32 bits; method 0) and a FULL DIRECTORY INDEX that also lists every parent directory (the engine looks a file up by walking
+#   its directories, and an empty parent entry is what lets it find "A/B/C/f" under "A/" and "A/B/"). No path hash index is written (flag 0): the engine falls back to the directory index, and
+#   the hash (CityHash64 of the lower-case path with a seed) is then not needed. The index is two blocks, primary then directory; the primary holds the directory index's own offset, so it is built twice.
 # Shader code archive (version 2): shader map hashes (20 bytes each), shader hashes (20 each), shader map entries {u32 first index, u32 shader count, u32 first preload, u32 preload count}, shader
 #   entries {u64 offset, u32 size, u32 raw size, u8 frequency} (17 bytes, packed), preload entries (16 each), shader indices (u32): each array is a u32 count and its elements; the code follows,
 #   offsets relative to its start. A shader whose size differs from its raw size is compressed.
@@ -312,6 +316,38 @@ class Pak:
             if len(b) != k: raise ValueError(f'{self.path}: {path} block {i} decodes to {len(b):#x} bytes, not {k:#x}')
             out.append(b); left -= k
         return b''.join(out)
+
+def write_pak(out, mount, files):
+    """An uncompressed, unencrypted version 11 pak (see "Writing" in the notes above) at out: files = [(path in the pak, bytes)], paths relative to mount (mount is "../../../" for the game's own).
+    A game mounts a pak named <stem of another>_99_P.pak beside it with priority over the original (Unreal's patch paks), so the files here replace those of the same path"""
+    import hashlib
+    def fstr(t): b = t.encode('utf-8') + b'\0'; return struct.pack('<i', len(b)) + b
+    data, recs = bytearray(), []
+    for path, blob in files:
+        off = len(data)
+        data += struct.pack('<qqqI', 0, len(blob), len(blob), 0) + hashlib.sha1(blob).digest() + struct.pack('<BI', 0, 0) + blob   # FPakEntry: offset, size, raw size, method 0, SHA-1, flags, block size
+        recs.append((path, off, len(blob)))
+    enc, where = bytearray(), {}
+    for path, off, size in recs:
+        if off >= 1 << 32 or size >= 1 << 32: raise ValueError(f'{path}: a replacement pak holds at most 4 GB')
+        where[path] = len(enc); enc += struct.pack('<III', (1 << 31) | (1 << 30) | (1 << 29), off, size)
+    dirs = {}
+    for path, _, _ in recs:
+        d, _, f = path.rpartition('/'); d = d + '/' if d else '/'
+        dirs.setdefault(d, {})[f] = where[path]
+        parts = d.strip('/').split('/') if d != '/' else []
+        for i in range(len(parts)): dirs.setdefault('/'.join(parts[:i]) + '/' if i else '/', {})   # the parents, empty
+    di = bytearray(struct.pack('<i', len(dirs)))
+    for d, fs in dirs.items():
+        di += fstr(d) + struct.pack('<i', len(fs))
+        for f, o in fs.items(): di += fstr(f) + struct.pack('<i', o)
+    def primary(di_off):
+        p = bytearray(fstr(mount)) + struct.pack('<iQ', len(recs), 0) + struct.pack('<i', 0)   # entry count, path hash seed, no path hash index
+        p += struct.pack('<iqq', 1, di_off, len(di)) + hashlib.sha1(di).digest()                # the full directory index
+        return p + struct.pack('<i', len(enc)) + enc + struct.pack('<i', 0)                     # encoded entries, no unencoded ones
+    idx = len(data); p = primary(0); di_off = idx + len(p); p = primary(di_off)
+    foot = bytes(16) + struct.pack('<BIiqq', 0, 0x5A6F12E1, 11, idx, len(p)) + hashlib.sha1(p).digest() + bytes(32 * 5)
+    with open(out, 'wb') as f: f.write(data); f.write(p); f.write(di); f.write(foot)
 
 def zlib_block(b, k):
     """A Zlib block of k raw bytes: inflated no further than k (a damaged stream could inflate about 1,000 times its size), short when the stream ends early"""

@@ -167,6 +167,24 @@ static const char *fwd_slashes(const char *p, char *buf, size_t n) {
     size_t i = 0; for (; p[i]; i++) buf[i] = p[i] == '\\' ? '/' : p[i];
     buf[i] = 0; return buf;
 }
+__attribute__((weak)) const char *g_data_dir = "";   // main.c sets it to argv[1], the app's Resources/dm (weak here so the file-system unit tests link without main.c)
+// The RomFS overlay roots: DM_UE_QUALITY=<preset> (unless empty or off) puts <data dir>/ue_quality/<preset> in front of DM_ROMFS_OVERLAY's. An Unreal game reads its device-profile console variables from cooked .ini files
+// in a pak at boot: a console variable written into memory later never reaches the renderer (it reads a scalability cache) and r.setres is a command, so a preset has to be what the game boots with.
+// The packer's folder holds, per preset, a pak named <stem of the pak holding the ini>_99_P.pak in that pak's directory (dm/tools/ue_quality.py); the game mounts such a patch pak with priority over the
+// original, and the overlay serves it as a RomFS file. Measured on Demon Slayer 2: r.setres=1920x1080 in the replaced SwitchDeviceProfiles.ini started its swap chain at 1920x1080 (1600x900 otherwise) and its shadow depth targets at 1024x1024 (256 otherwise)
+static void rom_overlay_roots(char *out, size_t n) {
+    out[0] = 0; static int logged;   // the mount and MountRom both come through here
+    const char *q = getenv("DM_UE_QUALITY");
+    if (q && *q && strcmp(q, "off")) {
+        char root[1024]; snprintf(root, sizeof root, "%s/ue_quality/%s", g_data_dir, q);
+        struct stat st;
+        if (!strchr(q, '/') && !stat(root, &st) && S_ISDIR(st.st_mode)) { strlcpy(out, root, n); if (!logged) LOG("ue quality: preset %s (%s)", q, root); }
+        else if (!logged) LOG("[RED] ue quality: preset %s has no folder %s; starting without it", q, root);
+        logged = 1;
+    }
+    const char *ov = getenv("DM_ROMFS_OVERLAY");
+    if (ov && *ov) { if (out[0]) strlcat(out, ":", n); strlcat(out, ov, n); }
+}
 static int norm_rest(const char *rest, char *out, size_t n);
 static int rom_overlay_path(const mount_t *m, const char *rest, char *out, size_t n);
 // A path on an image mount: returns 1 with the mount in *mi and the entry in *k (-1 with errno set when there is none); 0 for a path on any other mount, or one an overlay folder (DM_ROMFS_OVERLAY) has, which then opens as a host file
@@ -194,8 +212,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     g_mnt[g_nmnt].txn_root = -1;
     atomic_store(&g_mnt[g_nmnt].poison, 0);
     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
-    if (!strcmp(name, "rom") && getenv("DM_ROMFS_OVERLAY"))
-        strlcpy(g_mnt[g_nmnt].overlay, getenv("DM_ROMFS_OVERLAY"), sizeof g_mnt[0].overlay);
+    if (!strcmp(name, "rom")) rom_overlay_roots(g_mnt[g_nmnt].overlay, sizeof g_mnt[0].overlay);
     // The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only -- saves still read, every write fails, commits are no-ops, the committed version is untouched, and the front end is told
     // (each of these three failures used to call die: with the phone's storage full the game exited as soon as it mounted its saves)
     int txn_err = 0, k = 0;
@@ -429,11 +446,9 @@ HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", "fsp-srv; rom reads the host d
 HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) {
     (void)cache; (void)sz; char b[1024];
     Result r = mount(name, envdir("DM_ROMFS", "romfs", b, sizeof b), 1);
-    if (r == RES_OK && getenv("DM_ROMFS_OVERLAY")) {
+    if (r == RES_OK) {
         PATH_LOCK();
-        for (int i = 0; i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) {
-            strlcpy(g_mnt[i].overlay, getenv("DM_ROMFS_OVERLAY"), sizeof g_mnt[i].overlay); break;
-        }
+        for (int i = 0; i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) { rom_overlay_roots(g_mnt[i].overlay, sizeof g_mnt[i].overlay); break; }
     }
     return r;
 }

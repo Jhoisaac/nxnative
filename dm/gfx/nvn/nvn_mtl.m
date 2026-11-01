@@ -6,6 +6,7 @@
 #undef I   // MetalFX brings in <complex.h>, whose I (the imaginary unit) would shadow the local tables named I below
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <objc/runtime.h>   // arch_open: class_getInstanceMethod / method_setImplementation
 #include <mach/mach_time.h>
 #include <mach/mach.h>
 #include <dlfcn.h>
@@ -5244,6 +5245,33 @@ static NSString *pso_user_path(void);
 // that cannot open it (one older than the archive's minimum, or an OS update that changed the GPU compiler) or a GPU it was not built for gets an info line, and the device builds
 // the bases itself as before (the on-device prebuild is the fallback)
 static id<MTL4Archive> g_arch_bundle; static NSString *g_bundle_dir;
+// Metal's archive loader reads each file it opens into memory it keeps for the archive's lifetime: newArchiveWithURL → MTL4ArchiveImpl::loadFromURL → LoaderGlobalState::loadFile
+// → -[NSData initWithContentsOfFile:options:maxLength:error:], a full read into malloc. Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 opens its 2.6 GB bundle and a
+// 3.0 GB device archive, so 5.8 GB of its 8.4 GB footprint at start and of its 10.5 GB in battle were copies of the archive files. arch_open has that read map the file instead (the
+// loader's options plus NSDataReadingMappedAlways, on the calling thread, for the duration of the call): the pages are clean and file-backed, outside the footprint, and the system
+// drops them under memory pressure and reads them again when touched. The files stay valid while mapped: the host replaces an archive file only by renaming a new one over it, and
+// compaction only unlinks; a file truncated in place (or its drive removed) under a running game would fault. The replacement passes self, the result and the error through as
+// raw pointers, so ARC adds no retain or release to the init method's ownership rules. No such method (another system's loader) or DM_PSO_ARCHIVE_MAP=0: read as before
+static _Thread_local int t_arch_map; static IMP g_arch_read; static _Atomic int g_arch_mapped_n; static _Atomic unsigned long long g_arch_mapped_bytes;
+static void *arch_read(void *self, SEL cmd, void *path, NSUInteger opts, NSUInteger max, void *err) {
+    int map = t_arch_map;
+    if (map) opts = (opts & ~(NSUInteger)NSDataReadingUncached) | NSDataReadingMappedAlways;
+    void *d = ((void *(*)(void *, SEL, void *, NSUInteger, NSUInteger, void *))g_arch_read)(self, cmd, path, opts, max, err);
+    if (map && d) { atomic_fetch_add(&g_arch_mapped_n, 1); atomic_fetch_add(&g_arch_mapped_bytes, (unsigned long long)((__bridge NSData *)d).length); }
+    return d;
+}
+static id<MTL4Archive> arch_open(NSString *p, NSError **e) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *m = getenv("DM_PSO_ARCHIVE_MAP"); if (m && !strcmp(m, "0")) return;
+        Method r = class_getInstanceMethod([NSData class], NSSelectorFromString(@"initWithContentsOfFile:options:maxLength:error:"));
+        if (r) g_arch_read = method_setImplementation(r, (IMP)arch_read);
+    });
+    t_arch_map = g_arch_read != NULL;
+    id<MTL4Archive> a = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:p] error:e];
+    t_arch_map = 0;
+    return a;
+}
 // Metal's loader crashes on malformed containers rather than returning an error. Check the GPU image's load commands and referenced file ranges, including every slice of a
 // universal archive, before giving it to Metal. This checks the container, not the compiler's private payload: Metal still decides whether this system can use its binaries.
 static int arch_macho_ok(int fd, uint64_t off, uint64_t size) {
@@ -5318,7 +5346,7 @@ static void pso_bundle_open(NSMutableArray<id<MTL4Archive>> *archp) {
     }
     uint64_t t0 = bp_now(); NSError *ae = nil;
     if (!arch_file_ok(p)) { MLOG("[RED] pipeline archive bundled with the app: %s is not a pipeline archive: the bases are built on the device", p.UTF8String); return; }
-    id<MTL4Archive> a = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:p] error:&ae];
+    id<MTL4Archive> a = arch_open(p, &ae);
     if (!a) { MLOG("pipeline archive bundled with the app: this system cannot open %s (%s; made for another system version, or an OS update changed the GPU compiler): the bases are built on the device",
                    p.UTF8String, ae.localizedDescription.UTF8String); return; }
     g_arch_bundle = a; g_bundle_dir = dir; [archp addObject:a];
@@ -5387,7 +5415,7 @@ static void pso4_init(void) {
                                           sortedArrayUsingSelector:@selector(compare:)];
             for (NSString *n in names.reverseObjectEnumerator) {   // newest first
                 NSString *p = [g_arch_dir stringByAppendingPathComponent:n]; NSError *ae = nil;
-                id<MTL4Archive> a = arch_file_ok(p) ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:p] error:&ae] : nil;
+                id<MTL4Archive> a = arch_file_ok(p) ? arch_open(p, &ae) : nil;
                 int pf = [n hasPrefix:@"p"];
                 if (a) { [pf ? archp : arch addObject:a]; if (!pf) [runf addObject:p]; bytes += [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize]; }
                 else MLOG("[RED] pipeline archive file %s not usable (%s): its bases are built again", p.UTF8String, ae ? ae.localizedDescription.UTF8String : "not a pipeline archive");
@@ -5398,6 +5426,8 @@ static void pso4_init(void) {
                  (unsigned long)archp.count - (g_arch_bundle != nil), bytes / 1048576.0, (bp_now() - t0) / 1e6);
         }
         g_arch4 = arch; g_arch4p = archp;
+        if (arch.count || archp.count) MLOG("pipeline archive: %d files mapped (%.1f MB) rather than read into memory%s", (int)g_arch_mapped_n, g_arch_mapped_bytes / 1048576.0,
+                                            g_arch_mapped_n ? "" : g_arch_read ? " (Metal's loader did not read them through NSData: each is in memory)" : " (DM_PSO_ARCHIVE_MAP=0, or no NSData read to map: each file is in memory)");
         NSError *ce = nil; g_comp4 = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&ce];
         if (!g_comp4) MLOG("[RED] no Metal 4 compiler (%s): render pipelines are built through the MTLDevice", ce.localizedDescription.UTF8String);
         else if (g_arch_dir) {

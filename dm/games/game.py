@@ -149,6 +149,7 @@ def header(g):
          f'#define DM_GAME_MEM_ALIAS {g.int("mem_alias"):#x}ull',
          f'#define DM_GAME_MEM_STACK {g.int("mem_stack"):#x}ull',
          f'#define DM_GAME_APP_POOL {g.int("app_pool"):#x}ull',
+         f'#define DM_GAME_UE_QUALITY_APP_POOL {int(g.get("ue_quality_app_pool", "0"), 0):#x}ull',   # the application pool reported while an Unreal graphics-quality preset is chosen (hle_svc.c app_pool); 0: app_pool
          f'#define DM_GAME_MEM_USED {int(g.get("mem_used", "0x4000000"), 0):#x}ull',   # used memory reported beside the heap (hle_svc.c GetInfo UsedMemorySize)
          f'#define DM_GAME_SYS_RESOURCE {int(g.get("sys_resource", "0x2000000"), 0):#x}ull',   # the NPDM's system resource size (hle_svc.c GetInfo TotalSystemResourceSize; 0 = no virtual address memory)
          f'#define DM_GAME_ARGS {q(g.get("game_args", ""))}',   # game arguments when the command line gives none (main.c; Octopath Traveler 0: Unreal's -SwitchVirtualAddressSpaceSize=)
@@ -170,6 +171,7 @@ def header(g):
          f'#define DM_GAME_FEEDBACK_SNAP {q(" ".join(fbs))}',
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
          f'#define DM_GAME_RENDER_COND {int(rcd == "on")}',
+        f'#define DM_GAME_UE_QUALITY {int(g.table("ue_quality.tsv").is_file())}',   # the profile has Unreal graphics-quality presets (dm/tools/ue_quality.py): the settings window offers them
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
