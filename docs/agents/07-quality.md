@@ -70,6 +70,26 @@ The settings window's Upscaling row (`DM_PRESENT_UPSCALE`) keeps its meaning. Me
 
 ## What presets cannot reach
 
-- **Texture resolution.** Most texture groups were cooked with `LODBias=1`, and the cook usually strips the mips that bias skips. Lowering `LODBias` then gains nothing; sharper textures need the files of another platform's build.
+- **Texture resolution, from the Switch files alone.** Most texture groups were cooked with `LODBias=1`, and the cook usually strips the mips that bias skips. Lowering `LODBias` then gains nothing by itself; sharper textures need the files of another platform's build ([PC textures](#pc-textures)).
 - **Effects with no cooked shaders.** See step 4.
 - **Engines other than Unreal.** Crash Team Racing Nitro-Fueled runs on Vicarious Visions' Alchemy engine, which has no `.ini` / console-variable system. Its resolution has to be found in its own code and raised there, as the `RENDER_SCALE` rewriter patches do for other games (`dm/games/*/patches.py`).
+
+## PC textures
+
+When the player owns the game on PC as well, the PC build can supply the texture mips the Switch cook stripped. This needs an Unreal Engine 5 game whose two builds share the IoStore/zen package layout, so that a package has the same chunk IDs (a hash of its lower-case path) and the PC chunks load in the Switch build. Demon Slayer 2 was the first; its note has the comparison and the pilot ([Graphics quality](../../dm/games/0100AD80208A8000/README.md#graphics-quality)).
+
+The mechanism:
+
+- `ue_pc_assets.tsv` in the profile chooses packages per preset: `textures` rows take the matching textures whose PC top mip has more pixels (same pixel format), `package` rows take every match (a map's `*_BuiltData` lightmaps).
+- `dm/tools/ue_pc_assets.py` indexes both builds' containers, skips a package whose container-header store entry (imports, shader map hashes) differs, and copies the chosen packages' chunks from the PC `.ucas` block for block (Oodle blocks are not recompressed) into `<stem>_99_P.utoc` / `.ucas` with `uepak.write_toc`. The container gets the PC store entries in its header (chunk type 6, version 3) and a perfect-hash chunk table, as the game's own TOCs (version 5) have.
+- The container goes into the preset's folder beside that preset's `<stem>_99_P.pak`. Unreal mounts a `.utoc` with the pak of the same name, with the pak's patch priority, so the chosen chunks resolve to the PC ones; everything else stays the Switch's.
+- The preset's `ue_quality.tsv` rows set `LODBias` to 0 (`TextureLODGroups`, `LODBias=1>0`) and a larger `r.Streaming.PoolSize`, so the engine streams the extra mip.
+- The NSP script builds it only when given the PC `Content/Paks` folder (`--ue-pc-paks`, `UE_PC_PAKS`); nothing from the PC build enters the repository.
+
+Checks for a new game:
+
+1. Compare the builds first: the TOC version and flags, the container-header version, and a texture package on both sides (pixel format, `FirstMipToSerialize`, mip count). The PC Oodle blocks must decode with the game's own Oodle (`uepak.OodleHost`).
+2. Find what a route loads with `DM_FSLOG`: a file read from the RomFS image is logged as `img:<name>`, and the offsets map to the containers' blocks and chunks, and through the TOC directory index (`Toc.paths()`) to package paths.
+3. Boot with the preset and check that the game reads `<stem>_99_P.ucas` when the chosen packages load, that no `[RED]` line appears, and the memory lines (`[mem] alias region mapped`, `DM_MEMSTAT`).
+4. Compare a scene with and without the container, with the same `ue_quality.tsv` rows in both, and once with the textures only. A lightmap package changes the scene's lighting, not only its detail, so judge it on its own.
+

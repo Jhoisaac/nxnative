@@ -54,6 +54,8 @@ LANGUAGE = ''                           # game language, a code or a name: 'ja',
                                         #   DM_LANG=<code> in the app's Documents/env.txt changes it without a rebuild
 KEEP_EXTRACTED = True                   # keep the extracted game files after the IPA is built (saves extraction next time; as big as the game files); False deletes them
 DM_ENV_FILE = ''                        # optional: environment switches for a diagnostic build (one KEY=VALUE per line)
+UE_PC_PAKS = ''                         # PLATFORM 'mac-app', an Unreal game whose profile has ue_pc_assets.tsv: the Content/Paks folder of your own PC copy of the game; its higher-resolution textures go into the
+                                        # graphics-quality presets the table names (dm/tools/ue_pc_assets.py; nothing is copied into the repository). Empty = the Switch textures
 PSO_GPUS = ''                           # NVN games: GPU architectures the app gets the shader pairs' pipeline bases for, made on this Mac (metal-tt, comma-separated: 'g18p' = A19 / A19 Pro of the iPhone 17 family;
                                         #   another device's name is in its log when the app has none for it), so the device does not build them on its first start; each adds about 650 MB to the app (Breath of the Wild) and minutes to a first build; 'none' = no archive;
                                         #   empty = by the game's profile: 'g18p' when it sets pso_mtl4 on (the Metal 4 path, the only one that reads the archive on iOS, is on for it), else 'none'
@@ -2035,7 +2037,7 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
-def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus=''):
+def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', pc_paks=''):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in, or a Vulkan or GL game's <shader>, whose vk / gl goes in), the DLC, the profile's tables (with the shader pairs
     the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS), the launcher settings and an environment file.
@@ -2051,6 +2053,12 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
         PROG.set(step='graphics quality presets')
         quality = work / 'app/ue_quality'
         run([py, repo / 'dm/tools/ue_quality.py', g.id, rfs.source(game), quality, host, patched], logs / 'ue_quality.log', env=env)
+    if pc_paks and not g.table('ue_pc_assets.tsv').is_file(): say(f'the game profile has no ue_pc_assets.tsv: the PC folder ({pc_paks}) is not used')
+    elif pc_paks:   # another platform's higher-resolution packages as an IoStore patch container in the presets' folders (dm/tools/ue_pc_assets.py; read from the player's own copy, block for block)
+        pc = Path(os.path.expanduser(pc_paks)).resolve()
+        if not pc.is_dir(): raise BuildError(f'the PC Paks folder (--ue-pc-paks / UE_PC_PAKS) is not a folder: {pc}')
+        PROG.set(step='PC textures'); quality = quality or work / 'app/ue_quality'
+        run([py, repo / 'dm/tools/ue_pc_assets.py', g.id, rfs.source(game), pc, quality, host, patched], logs / 'ue_pc_assets.log', env=env)
     cmd = [py, repo / 'dm/mac/pack_app.py', out, '--host', host, '--patched', patched, '--romfs', rfs.source(game), '--msl', lib, '--tables', g.table('shader_map.tsv').parent,
            '--font', font, '--title-id', f'{app:016X}', '--name', name, '--bundle-id', bundle_id, '--lang', lang, '--sign', sign or '-']
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
@@ -2099,6 +2107,7 @@ def parse_args(argv):
                     'it must be one the game supports, which the console lists')
     ap.add_argument('--keep-extracted', action=argparse.BooleanOptionalAction, help='keep the extracted game files after the IPA is built, for the next build (default: the KEEP_EXTRACTED setting, on)')
     ap.add_argument('--env-file', help='environment switches for a diagnostic build (one KEY=VALUE per line)')
+    ap.add_argument('--ue-pc-paks', help='--platform mac-app, an Unreal game whose profile has ue_pc_assets.tsv: the Content/Paks folder of your own PC copy, whose higher-resolution textures go into the presets (default: the UE_PC_PAKS setting)')
     ap.add_argument('--gpu', help='NVN games: GPU architectures the app gets its pipeline archive for, made on this Mac with metal-tt, comma-separated: g18p (A19 / A19 Pro), or the name a device\'s log gives when the app has no archive for its GPU; '
                     'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting; when that is empty, g18p for a game whose profile sets pso_mtl4 on, else none). '
                     'With --platform mac-app: the Mac app\'s archive, by default for this Mac\'s GPU (none: the app builds the bases on its first start)')
@@ -2393,7 +2402,7 @@ def main(args=None):
         host, font = mac_host(py, repo, work, env, logs, g)
         if not icon: say('[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
-                (args.gpu or PSO_GPUS).strip())
+                (args.gpu or PSO_GPUS).strip(), args.ue_pc_paks or UE_PC_PAKS)
         rmtree(work / 'tmp')
         say(f'done: {out_ipa} ({tree_size(out_ipa)[1] / 2**30:.1f} GB); '
             f'open it from Finder. Its save is in ~/Library/Application Support/nxnative/{app:016X}/, its log in ~/Library/Logs/nxnative/{app:016X}.log')

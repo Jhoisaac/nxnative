@@ -40,6 +40,10 @@
 #   index with the encoded entries (bits 29-31 set: offset, raw size fit 32 bits; method 0) and a FULL DIRECTORY INDEX that also lists every parent directory (the engine looks a file up by walking
 #   its directories, and an empty parent entry is what lets it find "A/B/C/f" under "A/" and "A/B/"). No path hash index is written (flag 0): the engine falls back to the directory index, and
 #   the hash (CityHash64 of the lower-case path with a seed) is then not needed. The index is two blocks, primary then directory; the primary holds the directory index's own offset, so it is built twice.
+# Writing an IoStore container (write_toc, for a patch container the game mounts over its own: Unreal's loader gives a container mounted later, such as <stem>_P.utoc, priority over the earlier ones):
+#   TOC version 5, blocks of 64 KB, no directory index (size 0, flag 8 clear), no encryption or signing; flag 1 when any block is Oodle-compressed (method names: "Oodle" only). The chunks are stored in
+#   perfect hash slot order (io_perfect_hash: seed count ceil(n / 2), no overflow list), each chunk's offset in the uncompressed stream a multiple of 64 KB, its blocks in the .ucas 16-aligned.
+#   After the blocks and method names come the chunk metas (32-byte chunk hash, u8 flags) the engine reads for every chunk. container_header builds the container header chunk (type 6, version 3).
 # Shader code archive (version 2): shader map hashes (20 bytes each), shader hashes (20 each), shader map entries {u32 first index, u32 shader count, u32 first preload, u32 preload count}, shader
 #   entries {u64 offset, u32 size, u32 raw size, u8 frequency} (17 bytes, packed), preload entries (16 each), shader indices (u32): each array is a u32 count and its elements; the code follows,
 #   offsets relative to its start. A shader whose size differs from its raw size is compressed.
@@ -413,21 +417,71 @@ class Toc:
         b = open(path, 'rb').read()
         if b[:16] != TOC_MAGIC: raise ValueError(f'{path}: not an IoStore TOC')
         self.path, self.key, self.version = path, key, b[16]
-        hsz, n, nblk, bsz, nmeth, mlen, self.block_size, _, nparts = struct.unpack_from('<9I', b, 20)
+        hsz, n, nblk, bsz, nmeth, mlen, self.block_size, self.dir_size, nparts = struct.unpack_from('<9I', b, 20)
         if bsz != 12: raise ValueError(f'{path}: compression block entries of {bsz} bytes')
-        self.encrypted = b[80] >> 1 & 1
+        self.flags = b[80]; self.encrypted = b[80] >> 1 & 1
         nseeds = struct.unpack_from('<I', b, 84)[0] if self.version >= 4 else 0
         self.part_size = struct.unpack_from('<Q', b, 88)[0] if self.version >= 3 and nparts > 1 else 1 << 64
         nover = struct.unpack_from('<I', b, 96)[0] if self.version >= 5 else 0
         o = hsz; self.ids = [b[o + 12 * i:o + 12 * i + 12] for i in range(n)]; o += 12 * n
-        self.ranges = [(int.from_bytes(b[o + 10 * i:o + 10 * i + 5], 'big'), int.from_bytes(b[o + 10 * i + 5:o + 10 * i + 10], 'big')) for i in range(n)]; o += 10 * n + 4 * nseeds + 4 * nover
+        self.ranges = [(int.from_bytes(b[o + 10 * i:o + 10 * i + 5], 'big'), int.from_bytes(b[o + 10 * i + 5:o + 10 * i + 10], 'big')) for i in range(n)]; o += 10 * n
+        self.seeds = list(struct.unpack_from(f'<{nseeds}i', b, o)); o += 4 * nseeds + 4 * nover
         self.blocks = []
         for i in range(nblk):
             e = b[o + 12 * i:o + 12 * i + 12]
             self.blocks.append((int.from_bytes(e[:5], 'little'), int.from_bytes(e[5:8], 'little'), int.from_bytes(e[8:11], 'little'), e[11]))
         o += 12 * nblk
         self.methods = [b[o + mlen * i:o + mlen * (i + 1)].rstrip(b'\0').decode('latin1') for i in range(nmeth)]
-        self.index = {c: i for i, c in enumerate(self.ids)}; self.files = {}
+        o += mlen * nmeth + self.dir_size; self.meta_at = o   # the directory index, then one 33-byte meta per chunk
+        self.index = {c: i for i, c in enumerate(self.ids)}; self.files = {}; self._paths = None
+    def meta(self, i):
+        """Chunk i's 33-byte meta (32-byte chunk hash, u8 flags; 1 = compressed), read from the .utoc"""
+        with open(self.path, 'rb') as f: f.seek(self.meta_at + 33 * i); m = f.read(33)
+        if len(m) != 33: raise ValueError(f'{self.path}: chunk {i} has no meta')
+        return m
+    def raw_blocks(self, i, lazy=False):
+        """Chunk i's blocks as stored: [(stored bytes, raw size, method name or '')], verbatim from the .ucas (what write_toc takes, to carry a chunk over without decoding it); lazy=True gives
+        a zero-argument function that reads the bytes in place of them (write_toc calls it when it writes the block, so a container is copied without holding its data)"""
+        if self.encrypted: raise ValueError(f'{self.path}: the container is encrypted')
+        off, ln = self.ranges[i]; first = off // self.block_size; out = []
+        def read(k):
+            at, size = self.blocks[k][:2]; f = self.ucas(at // self.part_size); f.seek(at % self.part_size)
+            d = f.read(size)
+            if len(d) != size: raise ValueError(f'{self.path}: chunk {i} block {k} is cut short')
+            return d
+        for k in range(first, (off + ln - 1) // self.block_size + 1 if ln else first):
+            m = self.blocks[k][3]
+            out.append(((lambda k=k: read(k)) if lazy else read(k), self.blocks[k][2], self.methods[m - 1] if m else ''))
+        return out
+    def paths(self):
+        """{chunk index: path} from the directory index (FIoDirectoryIndexResource, unencrypted), as the engine mounts it ("../../../APK2/Content/..."); {} when the container has none. The index is
+        the mount point (FString), the directories (u32 count, then name, first child, next sibling, first file: u32 each), the files (u32 count, then name, next file, chunk index) and the string table
+        (u32 count, FStrings); 0xFFFFFFFF = none. ValueError for an encrypted container or a damaged index"""
+        if self._paths is not None: return self._paths
+        out = {}
+        if self.dir_size:
+            if self.flags & 2: raise ValueError(f'{self.path}: the directory index is encrypted')
+            with open(self.path, 'rb') as f: f.seek(self.meta_at - self.dir_size); d = f.read(self.dir_size)
+            r = R(d, what='directory index'); mount = r.fstr()
+            dirs = [r.take('<4I') for _ in range(r.take('<I'))]; files = [r.take('<3I') for _ in range(r.take('<I'))]
+            strs = [r.fstr() for _ in range(r.take('<I'))]; none, seen = 0xFFFFFFFF, set()
+            def name(k):
+                if not 0 <= k < len(strs): raise ValueError(f'{self.path}: directory index string {k} is out of range')
+                return strs[k]
+            stack = [(0, mount)] if dirs else []   # (directory, path prefix); a directory's siblings share its prefix
+            while stack:
+                di, prefix = stack.pop()
+                while di != none:
+                    if di >= len(dirs) or ('d', di) in seen: raise ValueError(f'{self.path}: directory index entry {di} is out of place')
+                    seen.add(('d', di)); nm, child, sib, first = dirs[di]
+                    p = prefix + (name(nm) + '/' if nm != none else ''); fi = first
+                    while fi != none:
+                        if fi >= len(files) or ('f', fi) in seen: raise ValueError(f'{self.path}: directory index file {fi} is out of place')
+                        seen.add(('f', fi)); fn, nxt, ud = files[fi]; out[ud] = p + name(fn); fi = nxt
+                    if child != none: stack.append((child, p))
+                    di = sib
+        self._paths = out
+        return out
     def export_bundles(self):
         """Indices of the cooked packages' chunks (ExportBundleData): type 1 in Unreal Engine 5 (TOC version 4 and later), 2 in UE 4.25 to 4.27 (Kimetsu no Yaiba - The Hinokami Chronicles 1: TOC version 2; its
         chunk types are 2 ExportBundleData, 3 BulkData, 10 ContainerHeader, and 7, 8, 9 the loader's global metadata, names and name hashes in global.utoc)"""
@@ -504,6 +558,177 @@ def io_archive(toc, i, decode, chunk=None):
 
 IO_EXPORT_BUNDLE = 1   # EIoChunkType ExportBundleData in Unreal Engine 5: a cooked package's exports
 IO_EXPORT_BUNDLE_UE4 = 2   # the same chunk type in UE 4.25 to 4.27 (TOC versions 2 and 3)
+IO_BULK_DATA, IO_OPTIONAL_BULK_DATA, IO_MEMORY_MAPPED_BULK_DATA, IO_CONTAINER_HEADER = 2, 3, 4, 6   # EIoChunkType in Unreal Engine 5 (TOC version 4 and later)
+IO_BLOCK = 65536   # the compression block size write_toc writes
+
+def io_chunk_id(oid, index, typ):
+    """A chunk ID (12 bytes): u64 object ID, u16 index, u8 0, u8 EIoChunkType"""
+    return struct.pack('<QHBB', oid, index, 0, typ)
+
+def io_container_id(name):
+    """A container's ID: CityHash64 of its lower-case name (the file stem, "pakchunk10-Switch") in UTF-16 (also the object ID of its container header chunk)"""
+    return city64(name.lower().encode('utf-16-le'))
+
+def io_hash(cid, seed):
+    """The engine's perfect hash of a chunk ID: FNV-1 over its 12 bytes (multiply, then xor), starting from the seed, or from the FNV offset basis when the seed is 0"""
+    h = seed & 0xFFFFFFFFFFFFFFFF if seed else 0xcbf29ce484222325
+    for c in cid: h = ((h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF) ^ c
+    return h
+
+def io_lookup(ids, seeds, cid):
+    """The engine's lookup of a chunk ID in the table stored in slot order: the seed of bucket io_hash(cid, 0) % len(seeds) (0 = absent, negative = slot -seed - 1, else the slot is
+    io_hash(cid, seed) % len(ids)), and the chunk is there only if that slot holds this ID → its index, or None"""
+    if not ids or not seeds: return None
+    s = seeds[io_hash(cid, 0) % len(seeds)]
+    if not s: return None
+    slot = -s - 1 if s < 0 else io_hash(cid, s) % len(ids)
+    return slot if 0 <= slot < len(ids) and ids[slot] == cid else None
+
+def io_perfect_hash(ids):
+    """A perfect hash for unique chunk IDs (the engine's scheme, as the game's own TOCs use it): (slots, seeds), slots[k] = the index in ids of the ID stored in slot k, seeds = int32 list of
+    ceil(n / 2) buckets. Buckets (io_hash(id, 0) % seed count) are placed largest first, each given the smallest seed that sends its IDs to distinct free slots; a bucket of one takes
+    the next free slot (seed -slot - 1); an empty one stays 0. ValueError for duplicate IDs or a seed search past 1 << 24"""
+    n = len(ids)
+    if len(set(ids)) != n: raise ValueError('duplicate chunk IDs')
+    m = max(1, (n + 1) // 2); buckets = [[] for _ in range(m)]
+    for i, c in enumerate(ids): buckets[io_hash(c, 0) % m].append(i)
+    seeds, slots, free = [0] * m, [None] * n, [True] * n
+    order = sorted(range(m), key=lambda b: -len(buckets[b]))
+    for b in order:
+        if len(buckets[b]) < 2: break
+        s = 1
+        while True:
+            if s > 1 << 24: raise ValueError('no perfect hash seed found')
+            at = [io_hash(ids[i], s) % n for i in buckets[b]]
+            if len(set(at)) == len(at) and all(free[a] for a in at): break
+            s += 1
+        seeds[b] = s
+        for i, a in zip(buckets[b], at): slots[a] = i; free[a] = False
+    nxt = 0
+    for b in order:
+        if len(buckets[b]) != 1: continue
+        while not free[nxt]: nxt += 1
+        slots[nxt] = buckets[b][0]; free[nxt] = False; seeds[b] = -nxt - 1
+    return slots, seeds
+
+def stored_blocks(data):
+    """The blocks write_toc takes for an uncompressed chunk: 64 KB pieces, method ''"""
+    return [(data[o:o + IO_BLOCK], len(data[o:o + IO_BLOCK]), '') for o in range(0, len(data), IO_BLOCK)]
+
+def fstring(t):
+    """An FString: i32 length with the NUL (negative = UTF-16, its characters with the NUL) and the text"""
+    try: b = t.encode('ascii') + b'\0'; return struct.pack('<i', len(b)) + b
+    except UnicodeEncodeError: b = t.encode('utf-16-le') + b'\0\0'; return struct.pack('<i', -(len(b) // 2)) + b
+
+def dir_index(files, mount='../../../'):
+    """A directory index (the layout Toc.paths reads) for files = [(path starting with mount, chunk index)]"""
+    strs, at = [], {}
+    def s(t):
+        if t not in at: at[t] = len(strs); strs.append(t)
+        return at[t]
+    tree = dict(name=None, kids={}, files=[])
+    for path, ud in files:
+        if not path.startswith(mount): raise ValueError(f'{path}: not under {mount}')
+        parts = path[len(mount):].split('/'); node = tree
+        for d in parts[:-1]: node = node['kids'].setdefault(d, dict(name=d, kids={}, files=[]))
+        node['files'].append((parts[-1], ud))
+    dirs, fl, none = [], [], 0xFFFFFFFF
+    def emit(node):
+        k = len(dirs); dirs.append([none if node['name'] is None else s(node['name']), none, none, none]); prev = None
+        for nm, ud in node['files']:
+            fl.append([s(nm), none, ud])
+            if prev is None: dirs[k][3] = len(fl) - 1
+            else: fl[prev][1] = len(fl) - 1
+            prev = len(fl) - 1
+        prev = None
+        for kid in node['kids'].values():
+            c = emit(kid)
+            if prev is None: dirs[k][1] = c
+            else: dirs[prev][2] = c
+            prev = c
+        return k
+    emit(tree)
+    return (fstring(mount) + struct.pack('<I', len(dirs)) + b''.join(struct.pack('<4I', *d) for d in dirs) + struct.pack('<I', len(fl)) + b''.join(struct.pack('<3I', *f) for f in fl)
+            + struct.pack('<I', len(strs)) + b''.join(fstring(t) for t in strs))
+
+def write_toc(stem, name, chunks, paths=None):
+    """An IoStore container (see "Writing an IoStore container" in the notes above) at stem + '.utoc' and stem + '.ucas' (stem: a path without extension), name = the container's name for its ID
+    (the file stem); chunks = [dict(id=12 bytes, size=raw length, blocks=[(stored bytes or a zero-argument function returning them, raw size, method '' or 'Oodle')], meta=33 bytes or None (32 zero
+    bytes, flag from the blocks))]. The .ucas is written as the blocks come (a function is called once, when its block is written, and its length checked then), so only the tables stay in memory.
+    paths = {chunk ID: path starting "../../../"} also writes a directory index (flag 8). Each chunk is ceil(size / 64 KB) blocks, all 64 KB raw but the last. → the container ID. ValueError for what
+    the engine would not read: duplicate IDs, blocks that do not fit that rule, a stored block whose length is not its raw size, another method, a size of 2^40 or more, a stored block of 2^24 or
+    more. The file is read back and every ID looked up as the engine does"""
+    ids = [c['id'] for c in chunks]
+    if any(len(i) != 12 for i in ids): raise ValueError('a chunk ID is not 12 bytes')
+    for c in chunks:
+        size, blks = c['size'], c['blocks']
+        if not 0 <= size < 1 << 40: raise ValueError(f"{c['id'].hex()}: size {size} does not fit 40 bits")
+        if len(blks) != -(-size // IO_BLOCK): raise ValueError(f"{c['id'].hex()}: {len(blks)} blocks for {size} bytes")
+        if c.get('meta') is not None and len(c['meta']) != 33: raise ValueError(f"{c['id'].hex()}: a meta is 33 bytes")
+        for k, (d, raw, meth) in enumerate(blks):
+            if raw != min(IO_BLOCK, size - k * IO_BLOCK): raise ValueError(f"{c['id'].hex()}: block {k} has raw size {raw}")
+            if meth not in ('', 'Oodle'): raise ValueError(f"{c['id'].hex()}: method {meth!r}")
+            if not callable(d) and (not meth and len(d) != raw or len(d) >= 1 << 24): raise ValueError(f"{c['id'].hex()}: block {k} is {len(d)} bytes, raw size {raw}")
+    if paths is not None and not set(paths) <= set(ids): raise ValueError('paths names a chunk that is not in the container')
+    slots, seeds = io_perfect_hash(ids)
+    cid = io_container_id(name); compressed = any(m for c in chunks for _, _, m in c['blocks'])
+    rng, blk, metas, voff, pos = bytearray(), bytearray(), bytearray(), 0, 0
+    with open(stem + '.ucas', 'wb') as uf:
+        for sl in slots:
+            c = chunks[sl]; rng += voff.to_bytes(5, 'big') + c['size'].to_bytes(5, 'big'); voff += len(c['blocks']) * IO_BLOCK
+            if voff >= 1 << 40: raise ValueError('the container is larger than 2^40 bytes')
+            for d, raw, meth in c['blocks']:
+                if callable(d): d = d()
+                if not meth and len(d) != raw: raise ValueError(f"{c['id'].hex()}: stored block is {len(d)} bytes, raw size {raw}")
+                if len(d) >= 1 << 24: raise ValueError(f"{c['id'].hex()}: block stored in {len(d)} bytes")
+                pad = -pos & 15; uf.write(bytes(pad)); pos += pad
+                if pos >= 1 << 40: raise ValueError('the .ucas is larger than 2^40 bytes')
+                blk += pos.to_bytes(5, 'little') + len(d).to_bytes(3, 'little') + raw.to_bytes(3, 'little') + bytes([1 if meth else 0]); uf.write(d); pos += len(d)
+            metas += c['meta'] if c.get('meta') is not None else bytes(32) + bytes([1 if any(m for _, _, m in c['blocks']) else 0])
+    di = dir_index([(paths[ids[sl]], k) for k, sl in enumerate(slots) if ids[sl] in paths]) if paths else b''
+    head = bytearray(144); head[:16] = TOC_MAGIC; head[16] = 5
+    struct.pack_into('<9I', head, 20, 144, len(chunks), len(blk) // 12, 12, int(compressed), 32, IO_BLOCK, len(di), 1)
+    struct.pack_into('<Q', head, 56, cid); head[80] = (1 if compressed else 0) | (8 if di else 0)
+    struct.pack_into('<IQI', head, 84, len(seeds), 0xFFFFFFFFFFFFFFFF, 0)
+    toc = bytes(head) + b''.join(ids[sl] for sl in slots) + bytes(rng) + struct.pack(f'<{len(seeds)}i', *seeds) + bytes(blk) + (b'Oodle' + bytes(27) if compressed else b'') + di + bytes(metas)
+    with open(stem + '.utoc', 'wb') as f: f.write(toc)
+    t = Toc(stem + '.utoc')
+    if t.version != 5 or t.seeds != seeds or len(t.ids) != len(ids): raise ValueError(f'{stem}.utoc does not read back')
+    for k, c in enumerate(t.ids):
+        if io_lookup(t.ids, t.seeds, c) != k: raise ValueError(f'{stem}.utoc: chunk {c.hex()} is not found by the perfect hash')
+    if paths and len(t.paths()) != len(paths): raise ValueError(f'{stem}.utoc: the directory index does not read back')
+    return cid
+
+def container_header(cid, entries):
+    """A container header chunk (type 6, stored uncompressed), version 3, for entries = [(package ID, (imported package IDs), (20-byte shader map hashes))]: u32 signature 0x496f436e, u32 version,
+    u64 container ID, i32 package count and the package IDs, i32 byte count of the store entries and the entries, the same for the optional segment packages (none), then 12 zero bytes (no
+    redirect names, localized packages or package redirects). A store entry is 16 bytes {u32 import count, u32 import offset, u32 shader map hash count, u32 hash offset}, all of them first,
+    then each package's imports (u64 each) and hashes; each offset is relative to the start of its own array view, as Unreal's TFilePackageStoreEntryCArrayView stores it: the imports'
+    to the entry's start, the hashes' to the entry's start + 8 (what pc_compare's zen.py reads); 0 for an empty array"""
+    for pid, imps, hashes in entries:
+        if any(len(h) != 20 for h in hashes): raise ValueError(f'package {pid:#x}: a shader map hash is not 20 bytes')
+    head, tail = bytearray(), bytearray(); base = 16 * len(entries)
+    for j, (pid, imps, hashes) in enumerate(entries):
+        eo = 16 * j; oi = base + len(tail) - eo if imps else 0; tail += struct.pack(f'<{len(imps)}Q', *imps)
+        os_ = base + len(tail) - (eo + 8) if hashes else 0; tail += b''.join(hashes)
+        head += struct.pack('<IIII', len(imps), oi, len(hashes), os_)
+    store = bytes(head + tail)
+    return (struct.pack('<IIQi', 0x496f436e, 3, cid, len(entries)) + struct.pack(f'<{len(entries)}Q', *[e[0] for e in entries]) + struct.pack('<i', len(store)) + store
+            + struct.pack('<ii', 0, 0) + bytes(12))
+
+def read_container_header(d):
+    """A container header chunk (container_header's layout) → dict(cid=, version=, entries=[(package ID, (imported IDs), (20-byte hashes))]); ValueError for another signature or version"""
+    r = R(d, what='container header')
+    if r.take('<I') != 0x496f436e: raise ValueError('container header: wrong signature')
+    v = r.take('<I')
+    if v != 3: raise ValueError(f'container header: version {v}, not 3')
+    cid = r.take('<Q'); pids = r.array('Q', r.take('<i')); store = r.raw(r.take('<i')); out = []
+    for j, pid in enumerate(pids):
+        ni, oi, nh, oh = struct.unpack_from('<IIII', store, 16 * j) if 16 * j + 16 <= len(store) else (0, 0, 0, 0)
+        if 16 * j + 16 > len(store): raise ValueError('container header: store entries are cut short')
+        eo = 16 * j; R(store, eo + oi, 'container header').need(8 * ni); R(store, eo + 8 + oh, 'container header').need(20 * nh)
+        out.append((pid, struct.unpack_from(f'<{ni}Q', store, eo + oi) if ni else (), tuple(store[eo + 8 + oh + 20 * q:eo + 8 + oh + 20 * q + 20] for q in range(nh))))
+    return dict(cid=cid, version=v, entries=out)
 OODLE_HEAD, LSLG_AT = re.compile(b'[\x8c\xcc][\x06\x0a\x0b\x0c]'), re.compile(b'LSLG')   # an Oodle stream's first block header (Kraken, Mermaid, Selkie or Leviathan); a stored record
 TAG_FREQ = {'SV': 0, 'SH': 1, 'SD': 2, 'SP': 3, 'SG': 4, 'SC': 5}   # LSLG stage tag → EShaderFrequency
 
