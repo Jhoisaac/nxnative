@@ -1,6 +1,6 @@
 # Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 (`0100AD80208A8000`)
 
-Update v131072 (display version 1.02, `main` build `437c43801a1c9aee25bc83d4e8b18c64`) with its five DLC, SDK 16.2.3. CyberConnect2's game on Unreal Engine 5 (TOC version 5, no engine version string in `main`), with gRPC (`npln`) and CRI middleware (ADX2 sound, `.usm` movies). 60 fps on the Mac (30 on the Switch).
+Update v983040 (display version 1.81, `main` build `68e3a0ea176a79f403b859d4addad8c3`) with its seven DLC (Kaigaku and Zenitsu (Infinity Castle) added to 1.02's five), SDK 16.2.3; 1.02 (v131072, `main` `437c43801a1c9aee25bc83d4e8b18c64`) was the build first brought up, and its rows stay registered. 1.81 changes only `main` (`subsdk0` and `sdk` are the same builds); its text is 128.4 MB, beyond one patch area's reach (see Found on this game), and its cooked data gives 128,462 shaders (113,089 in 1.02), so the shader tables are 1.81's. On a first start with a save of 1.02 it shows two notices (new content: Muzan Kibutsuji, the Infinity Castle; the redeemed Kaigaku pack) that B closes; `smoke.tsv`'s route was made on 1.02 and does not close them. CyberConnect2's game on Unreal Engine 5 (TOC version 5, no engine version string in `main`), with gRPC (`npln`) and CRI middleware (ADX2 sound, `.usm` movies). 60 fps on the Mac (30 on the Switch).
 
 Status: brought up on the Mac: the title, the story mode's chapter map and its battles at 60 fps, with sound and controller rumble. The profile is the NSP script's provisional one with `fps_target 60` and a prewarm list (1,502 lines) recorded on the Mac. Not tried on the iPhone yet.
 
@@ -73,6 +73,7 @@ General changes first needed here; each applies to every game:
 - **metal-tt's stack on a large archive** (`pso_offline.py` `big_stack`): with the pairs decoded from its Unreal shader maps (108,611 bases) the offline archive build overflowed `air-nt`'s 8 MB main thread stack after 36 minutes; `metal-tt` now runs with the hard limit, 64 MB ([metal-tt's backend overflows its stack on a large archive](../../../docs/reference/shaders.md#metal-tts-backend-overflows-its-stack-on-a-large-archive)).
 - **Pipeline archive files mapped** (`nvn_mtl.m` `arch_open`, unit test `t_pso_archive`): Metal read every archive file into memory it kept, 5.8 GB of this game's footprint ([Pipeline archive files read into memory](../../../docs/reference/memory.md#pipeline-archive-files-read-into-memory)).
 - **Graphics quality presets** (`ue_quality.tsv`, `dm/tools/ue_quality.py`, `hle_fs.c` `DM_UE_QUALITY`, current): replacement paks of the device-profile ini, chosen in the settings window ([Graphics quality](#graphics-quality)).
+- **A second patch area for a text beyond 128 MB** (`patch_nso.py` `SPLIT_MODE`, `loader.c`, current): update 1.81's `main` has 128.4 MB of text, out of reach of any one area before the base ([A second patch area after the key page](../../../docs/reference/rewriter.md#a-second-patch-area-after-the-key-page-for-a-text-beyond-128-mb)).
 
 ## Open
 

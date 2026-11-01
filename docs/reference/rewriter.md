@@ -214,6 +214,14 @@ To enroll a cut for any game's own module:
 - **Fix:** when the text ends within 32 MB of the reach (`BIG_TEXT`), the patch area goes right before the base: the stubs follow the sites in address order, so each site's stub is about as far from it as the text is long. The first pass tries the gap that keeps every site in reach (2.6 MB here); when the patch area is larger (3.6 MB, 34,322 sites), the rewriter runs itself again with exactly that size (`DM_PATCH_FRONT`, set only by the rerun) and `B()` checks every branch.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) `main`: 125.3 MB of text.
 
+### A second patch area after the key page for a text beyond 128 MB
+
+- **Symptom:** `main: patch area of … bytes does not fit in -0x80000 before the base; rewriting again with …`, then an `AssertionError` in `nso_asm.B` (`site_plain`, the branch back to `ins.address + 4`).
+- **Cause:** the text is longer than the reach of a `B` (±128 MB; `main` of update 1.81 has 128.4 MB), so the last sites are more than 128 MB from every stub of one area before the base, however small it is (`BIG_TEXT` needs the text to end below `0x8000000 - 0x10000`).
+- **Fix:** `SPLIT_MODE` (`FAR` and a text ending within 20 KB of 128 MB or beyond) gives the module two patch areas: the front one before the base serves the sites below `SPLIT`, the back one at `BACK_OFF` (the 64 KB boundary after the key page) the sites at or above it. A first pass emits every stub into one area with the reach check off (`nso_asm.CHECK_REACH`), records each stub's site and size, and `split_plan` picks `SPLIT` by binary search as the middle of the range where the front stubs and the back stubs all reach; the rewriter then runs again with it (`DM_SPLIT`, `DM_PATCH_FRONT`, set only by that rerun) and `B()` checks every branch. Each stub, with the pads, exits and copies it branches to (window and jump-table stubs, spin-wait copies and their pause and trampolines), goes into the area of its site, so nothing but the site's own `B` and the stub's branch back crosses between areas; everything else reaches the key page and the original code by `ADRP`. `patched.bin` is text + ro + data (`FILE_IMAGE_LEN`) + the front area + the back area (each padded to 16 KB), and `fixups.tsv` gets `BACK_PATCH_OFF` / `BACK_PATCH_LEN` and an `IMAGE_SIZE` that holds the back area. The Mac loader maps it executable at `base + BACK_PATCH_OFF`; `QueryMemory` reports it as read-only; the iOS embedding (`gen_embed.py`) and a module with `FRAME_STEP` stubs refuse it.
+- **Found on:** [Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2](../../dm/games/0100AD80208A8000/README.md) update 1.81 `main`: 128.4 MB of text (1.02 had 127.99 MB and keeps its single front area).
+- **Check:** modules below the threshold produce byte-identical output (1.02 `main`).
+
 ## Cuts and observation gates
 
 ### Observation gates where x9–x17 are dead

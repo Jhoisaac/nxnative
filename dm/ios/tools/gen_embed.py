@@ -20,6 +20,7 @@ def pieces(n):   # the module's (x0, W, x1) as (file start, end)
     ko, ks = int(hdr['KEY_PAGE_OFF'], 16), int(hdr['KEY_PAGE_SIZE'], 16)
     bin_ = os.path.abspath(f'{out}/{n}.patched.bin'); sz = os.path.getsize(bin_)
     a, end = r16(te), r16(sz)
+    assert 'BACK_PATCH_OFF' not in hdr, f'{n}: a second patch area (patch_nso.py SPLIT_MODE) is not supported by the iOS embedding'
     if po < 0:   # patch area before the base (patch_nso.py FAR): W ends at the end of data, the loader supplies zero pages for bss and the key page; in the file the patch area follows at FILE_IMAGE_LEN
         fl = int(hdr['FILE_IMAGE_LEN'], 16)
         assert fl % PG == 0 and a <= fl and ko % PG == 0 and ks == PG and ko >= fl

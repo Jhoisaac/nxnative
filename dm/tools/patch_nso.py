@@ -27,12 +27,20 @@ bss = MOD.bss
 # Every jump between the patch area and the code is a B (±128 MB). A patch area appended after the image (with bss) cannot reach the code when it would start beyond 112 MB (leaving 16 MB for the patch area): Metroid Dread's main has about 1.8 GB of bss (the engine's static heap); Engage's main starts its patch area at about 103 MB and keeps it after the image.
 # The patch area then sits FRONT bytes before the module base (PATCH_OFF is negative), and the output file holds only text + ro + data (FILE_IMAGE_LEN) followed by the patch area; the loader supplies zero pages for bss and the key page (IMAGE_SIZE is the whole image).
 # The key page stays after bss (the patch area reaches it through ADRP, ±4 GB). Modules below the limit produce output byte-identical to before
+# A text segment beyond 128 MB (Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 1.81) is out of reach of any one area before the base: SPLIT_MODE adds a back patch area after the key page for the sites above a split point (BACK_PATCH_OFF / BACK_PATCH_LEN in fixups.tsv; see SPLIT_MODE below)
 NEAR_PATCH_OFF = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x4000 + 0xFFFF) & ~0xFFFF)   # where an appended patch area would start (as in the else branch below)
 FAR, FRONT = NEAR_PATCH_OFF > 0x7000000, 0x2000000
 # A text segment that ends within 32 MB of the ±128 MB reach (Monster Hunter Rise: 125.3 MB of text) puts the patch area right before the base instead. Its stubs follow the sites in address
 # order, so the last site's stub ends up about as far from it as the text is long. The first pass tries the gap that keeps every site in reach; when the patch area does not fit there
 # (Monster Hunter Rise: 3.6 MB), the rewriter runs again with exactly the size it needs (DM_PATCH_FRONT, set only by that rerun) and B() checks every branch
-BIG_TEXT = FAR and MOD.text_end + FRONT > 0x8000000 - 0x10000
+# A text segment of more than 128 MB (Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 1.81: 128.4 MB) has sites that no area before the base reaches, whatever its size: SPLIT_MODE gives it two
+# patch areas, the front one for the sites below SPLIT and a back one after the key page (BACK_OFF) for the sites at or above it. A first pass (PROBE) emits everything into one area with B's
+# reach check off and records each stub's site and size; it picks SPLIT and the front size from those (split_plan) and runs again with them (DM_SPLIT, DM_PATCH_FRONT)
+SPLIT_MODE = FAR and MOD.text_end + 0x5000 > 0x8000000
+SPLIT, PROBE, PROBE_MARKS = (int(os.environ.get('DM_SPLIT', '0'), 0) or None) if SPLIT_MODE else None, False, []
+PROBE = SPLIT_MODE and SPLIT is None
+BIG_TEXT = FAR and not SPLIT_MODE and MOD.text_end + FRONT > 0x8000000 - 0x10000
+if SPLIT_MODE: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or 0x400000   # the measuring pass: about the size of a patch area (site_br's pads depend on the distance to the jump table)
 if BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
 IMG = MOD.image
 if not FAR: IMG.extend(bytes(bss))
@@ -42,6 +50,7 @@ if FAR:
     FILE_IMAGE_LEN = (len(IMG) + 0x3FFF) & ~0x3FFF
     KEY_PAGE_OFF = (len(IMG) + bss + 0x3FFF) & ~0x3FFF
     IMAGE_SIZE, PATCH_OFF = KEY_PAGE_OFF + 0x4000, -FRONT
+    BACK_OFF = (KEY_PAGE_OFF + 0x4000 + 0xFFFF) & ~0xFFFF   # SPLIT_MODE: where the back patch area starts (64 KB aligned)
 else:
     KEY_PAGE_OFF = (len(IMG) + 0x3FFF) & ~0x3FFF
     IMG.extend(bytes(0x4000))
@@ -129,6 +138,16 @@ KEY_INDEX = {k: i for i, k in enumerate(('K18', 'KTLS', 'KTLR', 'KGATE'))}
 
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
 patch = bytearray(); fix = []; gates = []; stats = {}
+if PROBE: nso_asm.CHECK_REACH = False
+AREA_FRONT, AREA_BACK = [PATCH_OFF, patch], [BACK_OFF if SPLIT_MODE else 0, bytearray()]
+def select_area(addr):
+    """The patch area the stub of the site at addr goes into (every site's stub is emitted right after this call). Without SPLIT_MODE there is one area and nothing happens; in the measuring pass
+    the call records the site and where its stub starts. Whatever a stub branches to inside the area (the spin copies' exits and pause, a window's exit stubs, a jump table's pads) is emitted
+    into the same area right after it, so only the site's own B and the stub's return B cross to the code"""
+    global patch, PATCH_OFF
+    if not SPLIT_MODE: return
+    if PROBE: PROBE_MARKS.append((addr, len(patch))); return
+    PATCH_OFF, patch = AREA_BACK if addr >= SPLIT else AREA_FRONT
 def stat(k): stats[k] = stats.get(k, 0) + 1
 def here(): return PATCH_OFF + len(patch)
 def emit(w, kind=None):
@@ -1081,13 +1100,16 @@ if far_into:   # functions analysed in pieces (pieces above): their far b / bl, 
 
 def put_branch(at, to): struct.pack_into('<I', IMG, at, B(at, to))
 for wseg in windows:
+    select_area(wseg[0].address)
     st, lo, hi = site_window(wseg); stat('window'); put_branch(lo, st)
 for parts in retries:
+    select_area(parts[0][0][0].address)
     st = site_retry_window(parts); stat('retry_window'); put_branch(parts[0][0][0].address, st)
 for a in sorted(kinds):
     if a in done: continue
     k, arg = kinds[a]
     ins = dis(struct.unpack_from('<I', IMG, a)[0], a)
+    if k != 'ctr': select_area(a)
     if k == 'x18':
         m = ins.mnemonic
         if m == 'br' and a in tailcalls: st = site_br_call(ins); stat('br_call')
@@ -1136,7 +1158,7 @@ for off, oid, ow, why in obs:
     after_bl = off >= 4 and struct.unpack_from('<I', IMG, off - 4)[0] >> 26 == 0x25
     assert off in set(starts) or after_bl or scratch_dead(off), f'observation gate neither at a function entry, after a bl nor before a call with x9–x17 unread {off:#x}'
     assert off < TEXT_END and off not in kinds and not any(lo <= off < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'observation gate conflicts with a rewrite site {off:#x}'
-    put_branch(off, site_obs(off, oid, w)); stat('obs')
+    select_area(off); put_branch(off, site_obs(off, oid, w)); stat('obs')
 
 # ---- Address regions (every module that defines the SDK's VammManager: sdk) ----
 # Three observation gates, found by the SDK's own symbols in any build, let the host keep the table of address regions (hle_svc.c "Address regions"): the alias region space each takes,
@@ -1178,7 +1200,7 @@ def stdalloc_gates():
         out.append((off, OBS_STDALLOC_INIT, f'{struct.unpack_from("<I", IMG, off)[0]:08x}', f'StandardAllocator::Initialize(void *, size_t{", bool" if name.endswith("b") else ""}) entry: the size in x2, capped when the address in x1 is null'))
     return out
 region_obs += stdalloc_gates()
-for off, oid, ow, why in region_obs: put_branch(off, site_obs(off, oid, int(ow, 16))); stat('obs')
+for off, oid, ow, why in region_obs: select_area(off); put_branch(off, site_obs(off, oid, int(ow, 16))); stat('obs')
 obs += region_obs
 
 # ---- Frame step in whole vsyncs (the mains whose patch file has FRAME_STEP: The Legend of Zelda: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0, Hyrule Warriors: Age of Calamity 1.3.0,
@@ -1197,6 +1219,7 @@ FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
 RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
 if BUILD_ID in FRAME_STEP and NAME == 'main':
+    assert not SPLIT_MODE, 'frame step stubs in a module with two patch areas: their sites would need a stub in each area'
     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
     if FAR:
         # The loader supplies zero-filled BSS/key pages for a front patch area.
@@ -1499,13 +1522,61 @@ def spin_emit(g):
     stat('spin')
 spin_regions = [g for g in (spin_region(T, spin_cand[T]) for T in sorted(spin_cand)) if g]   # all found on the unchanged image first: emitting patches back-edges
 spin_sites = [(g['T'], sorted(g['valid']), sum(len(g['nodes'][a]['ins']) for a in g['R'])) for g in spin_regions]
-for g in spin_regions: spin_emit(g)
+for g in spin_regions: select_area(g['T']); spin_emit(g)
 if os.environ.get('DM_SPIN_LIST'):
     for T, bes, n in spin_sites: print(f'{NAME} spin wait {T:#x} ({n} instructions), back-edges ' + ' '.join(f'{b:#x}' for b in bes))
 
 os.makedirs(outdir, exist_ok=True)
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
-if FAR:   # patch area before the base: file = text + ro + data (padded to 16K) + patch area
+def split_plan(marks, total):
+    """The measuring pass's stubs, marks = [(site, where its stub started in the one area)] in emission order, total = that area's length → (SPLIT, front area size). SPLIT is a site; the sites below
+    it have their stubs in the front area (which ends 0x4000 before the base), the others in the back one. A stub's site reaches it when the B between them is within L; the stub's last word
+    is the farthest point of a back stub, its first of a front one. Raising SPLIT only moves sites from the back area to the front one, so the highest SPLIT whose front stubs all reach and
+    the lowest whose back stubs all reach are found by binary search; SPLIT is the middle of that range (the same room on both sides)"""
+    L = 0x8000000 - 0x10000
+    sizes = [(marks[i + 1][1] if i + 1 < len(marks) else total) - marks[i][1] for i in range(len(marks))]
+    def front(sp):   # (size of the front area, farthest front stub)
+        pos = 0; items = []
+        for (a, _), n in zip(marks, sizes):
+            if a < sp: items.append((a, pos)); pos += n
+        size = (pos + 0x4000 + 0xFFFF) & ~0xFFFF
+        return size, max((a + size - p for a, p in items), default=0)
+    def back(sp):    # farthest back stub
+        pos = far = 0
+        for (a, _), n in zip(marks, sizes):
+            if a >= sp: pos += n; far = max(far, BACK_OFF + pos - a)
+        return far
+    cands = sorted({a for a, _ in marks})
+    lo, hi = 0, len(cands)   # lo = the lowest index whose SPLIT reaches in the back area (cands[len] = no site goes back)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if back(cands[mid]) <= L: hi = mid
+        else: lo = mid + 1
+    first = lo
+    lo, hi = 0, len(cands) - 1   # the highest index whose SPLIT reaches in the front area
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if front(cands[mid])[1] <= L: lo = mid
+        else: hi = mid - 1
+    last = lo
+    assert first <= last and first < len(cands) and front(cands[last])[1] <= L, \
+        f'{NAME}: no SPLIT point: the back area (after {BACK_OFF:#x}) reaches only the sites from {cands[min(first, len(cands) - 1)]:#x} on, the front area only the sites up to {cands[last]:#x}'
+    sp = cands[(first + last) // 2]
+    return sp, front(sp)[0]
+
+if SPLIT_MODE and PROBE:   # measuring pass: choose SPLIT and the front size, then run again for real
+    sp, fsize = split_plan(PROBE_MARKS, len(patch))
+    print(f'{NAME}: text of {MOD.text_end:#x} bytes is beyond the reach of one patch area before the base: two patch areas, SPLIT {sp:#x}, front {fsize:#x} bytes, back at {BACK_OFF:#x}; rewriting again', flush=True)
+    os.execve(sys.executable, [sys.executable] + sys.argv, dict(os.environ, DM_SPLIT=hex(sp), DM_PATCH_FRONT=hex(fsize)))
+if SPLIT_MODE:   # file = text + ro + data (padded to 16K) + front area + back area (each padded to 16K); the back area follows the key page and the frame step state page
+    front_area, back_area = AREA_FRONT[1], AREA_BACK[1]
+    PATCH_OFF = AREA_FRONT[0]   # select_area left the last site's area in it
+    assert len(front_area) <= FRONT - 0x4000, f'front patch area of {len(front_area):#x} bytes does not fit in the {FRONT:#x} before the base'
+    pad = lambda b: bytes(b) + bytes(-len(b) & 0x3FFF)
+    BACK_LEN = len(pad(back_area)); IMAGE_SIZE = BACK_OFF + BACK_LEN
+    print(f'{NAME}: SPLIT {SPLIT:#x}: front patch area {len(front_area):#x} bytes at {-FRONT:#x}, back patch area {len(back_area):#x} bytes at {BACK_OFF:#x}', flush=True)
+    open(P('patched.bin'), 'wb').write(IMG + bytearray(FILE_IMAGE_LEN - len(IMG)) + pad(front_area) + pad(back_area))
+elif FAR:   # patch area before the base: file = text + ro + data (padded to 16K) + patch area
     if BIG_TEXT and len(patch) > FRONT - 0x4000 and 'DM_PATCH_FRONT' not in os.environ:
         need = (len(patch) + 0x4000 + 0xFFFF) & ~0xFFFF
         print(f'{NAME}: patch area of {len(patch):#x} bytes does not fit in {FRONT:#x} before the base; rewriting again with {need:#x}', flush=True)
@@ -1519,6 +1590,7 @@ with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for 
     for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
+    if SPLIT_MODE: f.write(f'# BACK_PATCH_OFF\t{BACK_OFF:#x}\n# BACK_PATCH_LEN\t{BACK_LEN:#x}\n')   # a second patch area after the key page (SPLIT_MODE): offset from the base, bytes at the end of the file
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
@@ -1543,5 +1615,5 @@ with open(P('cuts.tsv'), 'w') as f:
 with open(P('obs.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, oid, ow, why in obs: f.write(f'{off:#x}\t{oid}\t{ow}\t{why}\n')
-print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(patch), 'PATCH_OFF', hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))
+print(NAME, stats, 'cuts', len(cuts), 'obs', len(obs), 'patch', len(AREA_FRONT[1]) + len(AREA_BACK[1]) if SPLIT_MODE else len(patch), 'PATCH_OFF', hex(AREA_FRONT[0]) if SPLIT_MODE else hex(PATCH_OFF), 'slot_refs', len(fix), 'gates', len(gates))
 if DATA_BLOCKS: print(NAME, 'data blocks left alone:', ', '.join(f'{s:#x}..{e:#x}' for s, e in DATA_BLOCKS))
