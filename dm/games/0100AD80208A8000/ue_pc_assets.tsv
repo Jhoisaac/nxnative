@@ -1,8 +1,11 @@
 # Another platform's packages for a preset (dm/tools/ue_pc_assets.py builds an IoStore patch container per preset from the player's own PC copy, given to the NSP script; dm/host/hle_fs.c serves it with the preset).
 # Columns, separated by tabs: preset, rule, pattern. Rule textures: the textures matching the pattern whose PC top mip has more pixels than the Switch's (the Switch cook stripped the top mips of about 9,000 of 21,185:
 # the device profile's LODBias=1, which ue_quality.tsv's max rows set to 0); rule package: every package matching (a map's *_BuiltData lightmaps). Patterns: fnmatch on the package path without ../../../ and the extension.
-# Pilot (2026-11-01): the tutorial fight's stage (a/015, a forest at night), Tanjiro's default model, the fight's demon (E0007) and the stage's baked lightmap.
-max	textures	APK2/Content/APK2/Art/Env/a/015/*
-max	textures	APK2/Content/APK2/Art/Model/Plc/P0001/V00/C00/*
-max	textures	APK2/Content/APK2/Art/Model/Emy/E0007/*
-max	package	APK2/Content/APK2/Maps/Env/a/015/BG/a015_Light_BuiltData
+# 2026-11-01: after the pilot (the stage a/015, Tanjiro, the demon E0007, the stage's lightmap) passed on the player's TV, every texture the PC build has larger and every map's baked lightmaps.
+max	textures	*
+max	package	*_BuiltData
+# Meshes: the PC static meshes keep the top LODs the Switch cook stripped from about 1,560 stage meshes; their cooked collision is named for the PC's physics format, renamed to the Switch's
+# (the Switch binary knows only PhysXGeneric). The rule takes a mesh only when its name map equals the Switch's after the rename, its export count is the same and it is longer.
+max	rename	PhysXPC=PhysXGeneric
+max	meshes	APK2/Content/APK2/Art/Env/*
+max	meshes	APK2/Content/APK2/DLC/*/Art/Env/*
