@@ -356,7 +356,7 @@ Signing: `pack_app.py` signs the inner host first, then the bundle (`codesign --
 
 ### Unreal graphics quality
 
-An Unreal game reads its device-profile console variables (resolution, shadow size, texture filtering) from cooked `.ini` files in a pak at boot. Writing a console variable into the game's memory later does not reach the renderer (it reads a scalability cache), and `r.setres` is a command, so a preset has to be what the game boots with. A profile with `ue_quality.tsv` ([format](../dm/games/README.md)) therefore gets presets as files:
+The procedure for giving another Unreal game presets, and what was learned on the first one, is [docs/agents/07-quality.md](agents/07-quality.md). An Unreal game reads its device-profile console variables (resolution, shadow size, texture filtering) from cooked `.ini` files in a pak at boot. Writing a console variable into the game's memory later does not reach the renderer (it reads a scalability cache), and `r.setres` is a command, so a preset has to be what the game boots with. A profile with `ue_quality.tsv` ([format](../dm/games/README.md)) therefore gets presets as files:
 
 1. The NSP script (mac-app) runs `dm/tools/ue_quality.py <id> <RomFS> <out> <host> <modules>`. For each preset it finds the ini in the game's own paks (`uepak.py`; an Oodle-compressed ini goes through the game's Oodle in the host), applies the rows (a console variable's `+CVars=` line replaced or added; `TextureLODGroups` fields) and writes `<out>/<preset>/<pak directory>/<pak stem>_99_P.pak` with `uepak.write_pak`. It stops with a message when an ini, a section or a `TextureLODGroups` line is missing.
 2. `pack_app.py --ue-quality <out>` copies the folders to `Resources/dm/ue_quality/`. The iOS IPA does not carry them yet.
