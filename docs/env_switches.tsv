@@ -28,6 +28,7 @@ DM_ENV_FILE_KEYS	switch	Set by the iOS app and the Mac launcher at launch to the
 DM_ENV_LAUNCH_KEYS	switch	Set at launch by the Mac launcher (the launcher settings already in the environment) and the iOS app (every DM_* variable already in it) to the space-separated names; the settings screen keeps those values and shows them greyed out
 DM_FD_LOG	diagnostic	`=<seconds>` logs, every that many seconds, the number and kinds of file descriptors the process has open
 DM_FIXED_TIME	switch	`=<seconds>`: the user clock always returns that time and the host time zone is pinned to UTC, for deterministic comparison
+DM_FOCUS_HOLD	switch	`1` keeps the game in focus when the Mac window is not key (`front_mac.m`); `regress.py` sets it, so a game that throttles out of focus is measured the same whatever app is in front
 DM_FONT_DIR	path	Folder of the shared-font stand-ins (`standard.ttf`, `nintendo_ext.ttf` with the button icons); the app, the Mac launcher and the NSP script set it
 DM_FORCE_STRICT	diagnostic	`=1` makes the loader fail on forced-hook entries no module references, instead of only noting them (for checking a mistyped list)
 DM_FPS	switch	`30` or `60` pins the frame rate the display link and frame pacing aim for; otherwise it follows the game's present interval (60, or 30 when the game asks for 30)
@@ -272,12 +273,14 @@ DM_TEMP	path	Temporary storage folder (default `$DM_ROOT/run/platform/temp`); st
 DM_TEST_ARCHIVE_CONSTANTS	test	Use optional function constants in the synthetic pipeline archive restart fixture
 DM_TEST_ARCHIVE_MIXED	test	Mix a newly compiled shader function with compacted bases in the archive restart fixture
 DM_TEST_BUILD	test	Build folder of `dm/host/tests` whose `t_svc_memory` `test_memory_profile.py` runs (default `build`; `make asan` sets `build/asan`)
+DM_TEST_FNMAP_IMAGES	test	`=<old .orig.bin>:<new .orig.bin>`: two builds of a main for the real-image case of `test_nso_fnmap.py` (skipped without it)
 DM_TEST_FS_FAIL	diagnostic	`=write:<n>[:<errno>]` makes the nth save write fail with that errno (default ENOSPC), which refuses the save transaction's commit
 DM_TEST_FS_FAILAT	diagnostic	`=<point>[:<count>][,…]` makes steps of the save transaction (`mountclone`, `reclone`, `guestname`, `renameback`) fail with ENOSPC
 DM_TEST_GEOMETRY	test	Path of the native `t_geometry` executable; `test_dmsh_geometry.py` runs its native geometry emitter checks only when it is set
 DM_TEST_GEOMETRY_PRIMITIVE_ID	test	Path to the native t_geometry_primitive_id replay executable used by test_dmsh_geometry.py with DMSH_TEST_GPU=1.
 DM_TEST_KEYRACE	diagnostic	`=<n>` creates up to n (at most 512) pthread keys on a thread of its own while the host starts up
 DM_TEST_KILL_AT	diagnostic	`=write:<n>` exits the process (`_exit(9)`) at the nth save write, imitating a kill mid-write
+DM_TEST_KIMETSU2_CHUNKS	test	`=<folder>`: the ExportBundleData chunk files of Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2, for the scale guard of `test_uepak_shadermaps.py` (skipped without it)
 DM_TEST_LEAK_GPU	diagnostic	`=1` allocates and keeps a 1 MB shared Metal buffer every 100 ticks: a GPU memory leak on demand
 DM_TEST_LINK_STALL	diagnostic	`=<start s>,<duration s>`: counting from the first present, pauses the display link at that point for that long, to check the present fallback
 DM_TEST_NO_METAL4	diagnostic	`=1` treats the GPU as one without Metal 4, as on a virtual Mac: the NVN layer starts only its classic part and drops every present
@@ -295,6 +298,7 @@ DM_TOUCH_LOG	diagnostic	`=1` logs each touch-screen read with touch points (samp
 DM_UDC_SELFTEST	diagnostic	`=1` runs a start-up check of DontCare load and store on private depth-stencil and RGBA8 textures (clear, Load + DontCare, read back) and logs one result line
 DM_UE_QUALITY	player	`=<preset>` (the Graphics quality setting; `off` or empty: none) puts `<data dir>/ue_quality/<preset>` in front of the RomFS overlay roots: an Unreal game's replacement pak of its device-profile ini (`dm/tools/ue_quality.py`), mounted by the game with priority; read when `rom` is mounted
 DM_UE_SHADERS	path	Folder of the Unreal shader code archives decoded by `uepak.py`, for `shader_split.py` (default `ue_shaders` beside the RomFS); needed when the RomFS has Unreal paks
+DM_VCONV_GPU	switch	`=0` converts the vertex attributes Metal's fetch cannot give the shader as it expects (8 / 16-bit integers into float inputs, integers read as floats, float-type formats into integer inputs) on the CPU at replay, as before, instead of by a vertex-function draw in the open pass (`vcg_encode`)
 DM_VK_CAPTURE	path	`=<dir>` (Mac) writes every SPIR-V module the game creates to `<dir>/<key>.spv`; the NSP script's Vulkan shader capture stage sets it
 DM_VK_LOG	diagnostic	`=1` logs Vulkan object creation in the Vulkan-on-Metal layer
 DM_VSYNC_HZ	switch	`=<Hz>`: rate at which a host thread fires the vi vsync event when the display link does not drive it (default 60)

@@ -305,7 +305,11 @@ void front_run(void (*guest)(void)) {
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
         [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
         [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized) dm_focus_set(2); }];
+        // DM_FOCUS_HOLD=1 (scripted runs: regress.py): the game stays in focus when the window is not key. A game that throttles out of focus (Unreal's background frame
+        // rate: Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 drew at about 26 fps, frame time p50 38 ms with GPU 11 ms) otherwise measures whatever app the person
+        // at the Mac has in front, and the same run passed at night and failed while the Mac was in use
+        static int focus_hold = -1; if (focus_hold < 0) { const char *fh = getenv("DM_FOCUS_HOLD"); focus_hold = fh && !strcmp(fh, "1"); if (focus_hold) LOG("front end: focus held in (DM_FOCUS_HOLD): the game is not told when the window loses key status"); }
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized && !focus_hold) dm_focus_set(2); }];
         [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
