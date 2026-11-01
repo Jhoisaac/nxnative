@@ -353,3 +353,10 @@ check_t_vk_desc: RUN_ENV = MTL_DEBUG_LAYER=1
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)
 check_t_float_pad: RUN_ENV = MTL_DEBUG_LAYER=1
+# Vertex attribute conversion on the GPU against the CPU's, every handled format; then the same draws with DM_VCONV_GPU=0 (the CPU path)
+t_vconv_gpu: t_vconv_gpu.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_vconv_gpu.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_vconv_gpu
+check_t_vconv_gpu: t_vconv_gpu
+	MTL_DEBUG_LAYER=1 ./t_vconv_gpu
+	MTL_DEBUG_LAYER=1 DM_VCONV_GPU=0 ./t_vconv_gpu

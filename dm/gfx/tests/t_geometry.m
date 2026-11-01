@@ -466,7 +466,7 @@ static void replay(int mode) {
         mtl_sub_commit();rec_drain();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,500000000),dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{gate.signaledValue=1;});
     }
-    state_reset();memset(&R,0,sizeof R);mtl_sub_begin();uint64_t waits=g_mdi_v;
+    state_reset();memset(&R,0,sizeof R);mtl_sub_begin();uint64_t waits=g_mdi_v,vcg0=g_vcg_runs;
     if(mode==8) {
         id<MTL4ComputeCommandEncoder> en=enc_c_begin(NULL);enc_c_pso(en,writer);
         uint64_t gpu,offset;void *buffer;mtl_gpu_addr((uint64_t)(commands+8192),16,&buffer,&offset,&gpu);enc_c_args(en,gpu,0);
@@ -480,7 +480,8 @@ static void replay(int mode) {
     if(conversion) {
         float first=-1;for(int i=0;i<64;i++)if(g_vconv[i].serial==g_sub_serial&&g_vconv[i].addr==(uint64_t)(commands+24576))
             for(NvArena *a in g_sub_arenas)if(g_vconv[i].gpu>=a->gpu&&g_vconv[i].gpu+4<=a->gpu+a->buf.length)memcpy(&first,(char*)a->buf.contents+g_vconv[i].gpu-a->gpu,4);
-        EXPECT("CPU conversion sees the queued GPU write",1,first==17);
+        // A GPU conversion (vcg_encode) reads the memory when the GPU runs, after the queued write by order, and has written nothing the CPU can read yet: t_vconv_gpu compares its bytes
+        EXPECT("CPU conversion sees the queued GPU write",1,g_vcg_runs>vcg0||first==17);
     }
     id<MTLBuffer> b=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];res_add(b);
     uint32_t *args=NULL;id<MTLBuffer> argsBuffer;
