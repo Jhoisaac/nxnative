@@ -264,6 +264,7 @@ DM_SLOWFRAME	diagnostic	`=1` writes the per-frame timing breakdown to the log on
 DM_SPIN	switch	`0` makes the rewriter's spin gate return at once, so guest poll loops spin with no sleep; the gate stays (on by default)
 DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it found and sends through a spin gate
 DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
+DM_SPLIT	switch	`=<hex>`: the address that divides the sites between the front and the back patch area of a text beyond the branch reach (`SPLIT_MODE`, `patch_nso.py`); set only by the rewriter's own rerun after its probe pass
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
 DM_SYMCHECK	diagnostic	`=1` checks every hashed module symbol lookup against a linear search and logs a red line for each mismatch
 DM_TEAM_ID	switch	Apple team ID for the per-game Xcode project, used when `--team-id` / `TEAM_ID` is not given; `build_ipa.sh` uses the placeholder `0000000000` (unsigned) when unset

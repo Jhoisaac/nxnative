@@ -191,7 +191,9 @@ static void read_layout(module_t *m, const char *dir) {
     char line[256], key[32]; unsigned long v; unsigned seen = 0;
     while (fgets(line, sizeof line, f)) {
         if (sscanf(line, "# %31s %lx", key, &v) != 2) die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
-        if (!strcmp(key, "PATCH_OFF")) m->patch_off = strtoll(line + 2 + strlen(key), NULL, 16);   // may be negative (patch area before the base)
+        if (!strcmp(key, "BACK_PATCH_OFF")) m->back_off = v;
+        else if (!strcmp(key, "BACK_PATCH_LEN")) m->back_len = v;
+        else if (!strcmp(key, "PATCH_OFF")) m->patch_off = strtoll(line + 2 + strlen(key), NULL, 16);   // may be negative (patch area before the base)
         else if (!strcmp(key, "IMAGE_SIZE")) m->image_size = v;
         else if (!strcmp(key, "FILE_IMAGE_LEN")) m->file_image_len = v;
         else if (!strcmp(key, "KEY_PAGE_OFF")) m->key_page_off = v;
@@ -213,6 +215,8 @@ static void read_layout(module_t *m, const char *dir) {
         die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
     if (m->patch_off < 0 && (!m->image_size || !m->file_image_len || m->file_image_len % 0x4000 || m->patch_off % 0x4000 || m->key_page_off + m->key_page_size > m->image_size))
         die("%s: patch area before the base, but IMAGE_SIZE / FILE_IMAGE_LEN missing or wrong", path);
+    if (!m->back_off != !m->back_len || (m->back_len && (m->patch_off >= 0 || m->back_off % 0x4000 || m->back_len % 0x4000 || m->back_off < m->key_page_off + m->key_page_size || m->back_off + m->back_len > m->image_size)))
+        die("%s: second patch area (BACK_PATCH_OFF / BACK_PATCH_LEN) wrong", path);
 }
 
 // Frame step state (the page after the key page, read-write; layout in patch_nso.py FRAME_STEP): the rewriter's stubs step the game by the host's whole vsyncs capped at this
@@ -537,6 +541,7 @@ static void map_image(module_t *m, const char *dir) {
     if (!x0 || !w || !x1) die("embedded sections %s / %s / %s missing", sx0, dm, sx1);
     // Patch area before the base (patch_off < 0): W ends at the end of data (FILE_IMAGE_LEN); bss and the key page are zero pages from vm_allocate and are not in the executable
     int front = m->patch_off < 0;
+    if (m->back_len) die("%s: a second patch area (patch_nso.py SPLIT_MODE) is not supported by the iOS loader (gen_embed.py)", m->name);
     if (z0 + zw != (front ? m->file_image_len : (uint64_t)m->patch_off) || (z0 & 0x3FFF) || (zw & 0x3FFF) || (z1 & 0x3FFF) || ((uintptr_t)x0 & 0x3FFF) || ((uintptr_t)w & 0x3FFF) || ((uintptr_t)x1 & 0x3FFF))
         die("%s embedded section layout mismatch (x0 %#lx w %#lx x1 %#lx, PATCH_OFF %#llx)", m->name, z0, zw, z1, (unsigned long long)m->patch_off);
     m->size = front ? m->image_size : m->patch_off + z1;
@@ -571,15 +576,20 @@ static void map_image(module_t *m, const char *dir) {
         // Patch area before the base: file = the first part of the image (text + ro + data) + patch area; bss and the key page are anonymous zero pages. The gap from the patch area's end to the base is left inaccessible (PROT_NONE)
         uint64_t pre = (uint64_t)-m->patch_off, fl = m->file_image_len;
         if (sz < fl) die("%s is shorter than FILE_IMAGE_LEN %#llx", path, (unsigned long long)fl);
-        m->size = m->image_size; m->patch_len = (sz - fl + 0x3FFF) & ~0x3FFFull;
+        uint64_t bl = m->back_len;   // a second patch area (patch_nso.py SPLIT_MODE) ends the file; the front one lies between FILE_IMAGE_LEN and it
+        if (sz < fl + bl) die("%s is shorter than FILE_IMAGE_LEN + BACK_PATCH_LEN", path);
+        m->size = m->image_size; m->patch_len = (sz - fl - bl + 0x3FFF) & ~0x3FFFull;
         if (m->patch_len > pre) die("%s patch area of %#llx bytes does not fit in the %#llx before the base", path, (unsigned long long)m->patch_len, (unsigned long long)pre);
         uint8_t *a = mmap(NULL, pre + m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
-        memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - fl); free(raw); install_key_page(m);
+        memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - fl - bl);
+        if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
+        free(raw); install_key_page(m);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
         if (mprotect(a, m->patch_len, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
+        if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
         if (pre > m->patch_len && mprotect(a + m->patch_len, pre - m->patch_len, PROT_NONE)) die("%s mprotect gap", m->name);
         return;
     }
