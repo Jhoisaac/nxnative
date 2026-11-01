@@ -1,5 +1,5 @@
 # Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2: CyberConnect2, Unreal Engine 5 (shaders inline in the cooked packages of eleven IoStore containers), SDK 16.2.3, NVN, gRPC, CRI movies;
-# update 1.02 (v131072) with its five DLC.
+# update 1.81 (v983040) with its seven DLC; 1.02 (v131072) was the first build brought up.
 # Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (its README.md); not tried on the iPhone yet
 # Format: see dm/games/README.md
 
@@ -14,8 +14,9 @@ app_category	public.app-category.games
 
 # ---- Versions ----
 build	v131072	1.02	main=437c43801a1c9aee25bc83d4e8b18c64	subsdk0=7c1a58cac01c4aa3935c6243f69cf0d3	sdk=835c229763ce5c1816a70f875bd70ccd
-package	v131072
-shader_versions	v131072
+build	v983040	1.81	main=68e3a0ea176a79f403b859d4addad8c3	subsdk0=7c1a58cac01c4aa3935c6243f69cf0d3	sdk=835c229763ce5c1816a70f875bd70ccd
+package	v983040
+shader_versions	v983040
 
 # ---- Files ----
 # every module main imports from

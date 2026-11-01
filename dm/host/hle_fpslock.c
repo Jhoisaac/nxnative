@@ -53,6 +53,12 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
     { "437c43801a1c9aee25bc83d4e8b18c64", "Unreal t.MaxFPS", 0xcd22ff0 + 0x10, 0, FPS_F32, 2 },
     { "437c43801a1c9aee25bc83d4e8b18c64", "Unreal rhi.SyncInterval", 0xcbfb958 + 0x10, 0, VSYNCS_I32, 2 },
     { "437c43801a1c9aee25bc83d4e8b18c64", "Unreal UEngine::FixedFrameRate", 0xcd23388, 0xaf8, FPS_F32, 1 },
+    // 1.81 (v983040): the same three, carried by matching the masked code around each reference and checked by disassembly: t.MaxFPS registered at main+0x412c8d0 (object
+    // main+0xcda6fe0, stored at main+0x412c918), rhi.SyncInterval at main+0x1d32eb4 (object main+0xcc7f958, main+0x1d32ef8), GEngine at main+0xcda7378 (all 379 references checked
+    // agree; the timing code at main+0x4ff2cdc reads +0xaf8, and the reflection params at main+0x9de3390 give FixedFrameRate offset 0xaf8)
+    { "68e3a0ea176a79f403b859d4addad8c3", "Unreal t.MaxFPS", 0xcda6fe0 + 0x10, 0, FPS_F32, 2 },
+    { "68e3a0ea176a79f403b859d4addad8c3", "Unreal rhi.SyncInterval", 0xcc7f958 + 0x10, 0, VSYNCS_I32, 2 },
+    { "68e3a0ea176a79f403b859d4addad8c3", "Unreal UEngine::FixedFrameRate", 0xcda7378, 0xaf8, FPS_F32, 1 },
     // Asian release 1.0.1: PR #289 verified the registering constructor at main+0x149e0a0 and its object at main+0x8adca10.
     { "b7f965b9d7227db8e29f04e84ea7331b", "Unreal rhi.SyncInterval", 0x8adca10 + 0x10, 0, VSYNCS_I32, 2 },
     // OCTOPATH TRAVELER II 1.1.1: Unreal Engine 4.27's t.MaxFPS and rhi.SyncInterval, the same layout (names in UTF-16). The game's Switch device profile sets t.MaxFPS=30 and
@@ -248,6 +254,15 @@ void dm_ctl_memdump(uint64_t a, uint64_t n, const char *path) {
     static uint8_t buf[1 << 16]; uint64_t done = 0;
     while (done < n) { size_t k = n - done < sizeof buf ? (size_t)(n - done) : sizeof buf; if (!rd(a + done, buf, k)) break; fwrite(buf, 1, k, f); done += k; }
     fclose(f); LOG("DM_CTL: memdump %#llx: %llu of %llu bytes → %s", (unsigned long long)a, (unsigned long long)done, (unsigned long long)n, path);
+}
+// "poke <main offset> <32-bit hex word>": one word of the main module written as is, for engine state that caches a console variable (Unreal's scalability cache keeps
+// its own copy of the shadow resolutions, which a write to the variable alone does not reach until the engine's sink runs)
+void dm_ctl_poke(uint64_t off, uint32_t v) {
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
+        if (off + 4 > g_mod[i].size || (off & 3)) { LOG("DM_CTL: poke main+%#llx: outside the module or unaligned", (unsigned long long)off); return; }
+        uint32_t *p = (uint32_t *)(uintptr_t)(g_mod[i].base + off); dm_guest_write_prepare(p, sizeof *p); *p = v;
+        LOG("DM_CTL: poke main+%#llx = %#x", (unsigned long long)off, v);
+    }
 }
 // "cvari <main offset> <value>": the same for an int console variable
 void dm_ctl_cvar_i32(uint64_t off, int32_t v) {
