@@ -70,7 +70,20 @@ static void mem_init(void) {
 // and hands the whole block to its own StandardAllocator (main+0x32137a0) -- so heap size = pool − image footprint, it has only as much as the host reports.
 // Previously 3 GB was reported here and SetHeapSize never failed: the heap was about 150 MB smaller than on the real device, at the run entry peak the main heap had only about 18 MB left, and under high local load a timing shift made a 128 KB request return null,
 // which the guest writes to without a null check (CRASH main+0x1b36138, re-verified after merge with inv_tap).
-#define APP_POOL DM_GAME_APP_POOL   // game profile app_pool (Mario 0xCD500000)
+// With an Unreal graphics-quality preset chosen (DM_UE_QUALITY, hle_fs.c) the profile's ue_quality_app_pool, when it has one, is reported instead: the game's allocator budgets against the total
+// the host reports, and a preset's larger render targets do not fit the Switch's pool. Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2 maps up to 2.75 GB of its 3.21 GB pool at the Switch
+// settings and 3.05 GB at 4K in battle mode; entering a story fight at 4K its allocator gave up on a 33 MB block (FGenericPlatformMemory::OnOutOfMemory, GenericPlatformMemory.cpp:251, RenderThread 0)
+// with no map refused by the host. The Mac has the memory; a Switch development unit reports more than a retail one too
+static uint64_t app_pool(void) {
+    static uint64_t v;
+    if (!v) {
+        const char *q = getenv("DM_UE_QUALITY");
+        v = DM_GAME_UE_QUALITY_APP_POOL && q && *q && strcmp(q, "off") ? DM_GAME_UE_QUALITY_APP_POOL : DM_GAME_APP_POOL;
+        if (v != DM_GAME_APP_POOL) LOG("[mem] application pool %.2f GB for the graphics-quality preset %s (the profile's ue_quality_app_pool; %.2f GB otherwise)", v / 1073741824.0, q, DM_GAME_APP_POOL / 1073741824.0);
+    }
+    return v;
+}
+#define APP_POOL app_pool()   // game profile app_pool (Mario 0xCD500000), or ue_quality_app_pool under a preset
 static size_t image_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) if (!g_mod[i].nro) n += g_mod[i].size;   // an NRO lives in memory the game allocated (its image and bss buffers)
     return (n + 0x1fffff) & ~(size_t)0x1fffff; }
 // Giant bss (modules with the patch area before the base, patch_nso.py FAR): the image bytes beyond the file part. Used memory was reported as "heap + 64 MB", where the 64 MB covers ordinary modules' code and data (Mario's two modules are about 74 MB together,

@@ -12,6 +12,7 @@ static void *req(const char *n){ void *p=guest_sym(n); if(!p) die("missing symbo
 
 // Game arguments: argv[0] is fixed to "game", and whatever follows "--" is appended as is (on a real device nn::init takes them from the process argument area and hands them to the SDK through SetHostArgc/Argv)
 static char *g_argv[64] = {"game"}; static int g_argc = 1;
+const char *g_data_dir = "";   // argv[1]: the app's Resources/dm (the rewritten modules and what the packer put beside them; hle_fs.c's DM_UE_QUALITY looks for ue_quality/<preset> there)
 
 static void guest_main(void) {
     guest_thread_init();
@@ -93,6 +94,7 @@ static void host_preload(int argc, char **argv) {
         LOG("game arguments from the game profile: %s", DM_GAME_ARGS);
     }
     if (!n) { static const char *def[] = DM_GAME_MODULES; for (int k = 0; k < DM_GAME_NMOD; k++) names[n++] = def[k]; }   // default module list from the game profile's modules (Mario: main sdk)
+    g_data_dir = argv[1];
     load_modules(argv[1], names, n);
     dm_sdk_major();   // logs the SDK version, which SDK-dependent behaviour follows (loader.c)
     uint64_t ta = now_ns();

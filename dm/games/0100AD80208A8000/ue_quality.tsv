@@ -1,0 +1,48 @@
+# Graphics-quality presets for an Unreal game, chosen in the settings window (DM_UE_QUALITY; dm/tools/ue_quality.py builds one replacement pak per preset, dm/host/hle_fs.c mounts it).
+# The game reads its device-profile console variables from cooked .ini files in a pak at boot, so a preset is the same ini with edits, in a pak named <stem of the pak holding the ini>_99_P.pak
+# beside that pak (Unreal mounts _P paks with priority). Columns, separated by tabs: preset (the setting's value; "off" has no rows), ini path in the pak, section (without brackets), key, value.
+#   key = a console variable: the section's +CVars=<key>=<old> line is replaced, or +CVars=<key>=<value> is added at the end of the section
+#   key = TextureLODGroups: value is Field=Value[,Field=Value...]; every +TextureLODGroups=(...) line of the section gets those fields replaced
+#   a field written Old>New (MinMagFilter=linear>aniso) is replaced only where it is Old: the point-filtered groups (8- and 16-bit data, 2D pixels) stay point
+# A row that matches no ini, no section, or (TextureLODGroups) no line stops the build. Handheld (the Switch DeviceProfile) keeps the Switch values; only SwitchConsole changes resolution.
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.setres	1920x1080
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.MaxResolution	1024
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.MaxCSMResolution	2048
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.DistanceScale	1.0
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.CSM.MaxCascades	3
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.MaxAnisotropy	8
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.StaticMeshLODDistanceScale	1.0
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.SkeletalMeshLODRadiusScale	1.0
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	grass.CullDistanceScale	1.0
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.AmbientOcclusionRadiusScale	0.8
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.LightMaxDrawDistanceScale	1.0
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Streaming.PoolSize	1200
+high	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	MinMagFilter=linear>aniso,MipFilter=point>linear
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.setres	2560x1440
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.MaxResolution	2048
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.AmbientOcclusion.HalfResolution	0
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.MaxCSMResolution	2048
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.DistanceScale	1.0
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.CSM.MaxCascades	3
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.MaxAnisotropy	8
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.StaticMeshLODDistanceScale	1.0
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.SkeletalMeshLODRadiusScale	1.0
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	grass.CullDistanceScale	1.0
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.AmbientOcclusionRadiusScale	0.8
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.LightMaxDrawDistanceScale	1.0
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Streaming.PoolSize	1200
+veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	MinMagFilter=linear>aniso,MipFilter=point>linear
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.setres	3840x2160
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.MaxResolution	2048
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.AmbientOcclusion.HalfResolution	0
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.MaxCSMResolution	2048
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.DistanceScale	1.0
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.CSM.MaxCascades	3
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.MaxAnisotropy	8
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.StaticMeshLODDistanceScale	1.0
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.SkeletalMeshLODRadiusScale	1.0
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	grass.CullDistanceScale	1.0
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.AmbientOcclusionRadiusScale	0.8
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.LightMaxDrawDistanceScale	1.0
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Streaming.PoolSize	1200
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	MinMagFilter=linear>aniso,MipFilter=point>linear

@@ -129,6 +129,46 @@ static void crash_gate(int sig) {
     if (none == me) _exit(128 + sig);
     for (;;) pause();
 }
+// DM_CRASH_PEEK=<item>[,<item>...]: guest memory to print in a crash report, for structures no register points at any more. <item> = ['*'...]<base>[+<hex>][:<words>][><hex>x<count>]:
+// <base> is a module name (its load address) or sp (the faulting thread's stack pointer), plus a hex offset; each leading * replaces the address with the pointer stored there; then
+// <words> 64-bit words are printed from it (default 12, max 64; module addresses as module offsets); ><off>x<n> follows the pointer at +<off> of each printed block to the next,
+// up to <n> blocks (max 4096: a render command list runs to hundreds of commands), stopping at a null link: a linked list. Every read goes through vm_read_overwrite, so a bad pointer ends that item with "unreadable" instead of faulting.
+// Found on Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2: its RHI thread crashed executing a recorded command with a null shader, and which pass recorded the command is
+// told only by the game's current-command global and the commands before it in the list (the loop keeps the list in a callee-saved register stored on the stack)
+static int peek_word(uint64_t a, uint64_t *w) {
+    vm_size_t got = 0;
+    return !(a & 7) && a >= 0x100000000ull && vm_read_overwrite(mach_task_self(), (vm_address_t)a, 8, (vm_address_t)w, &got) == KERN_SUCCESS && got == 8;
+}
+void crash_peek(uint64_t sp) {
+    const char *e = getenv("DM_CRASH_PEEK"); if (!e || !*e) return;
+    char spec[512]; strlcpy(spec, e, sizeof spec);
+    for (char *save = NULL, *t = strtok_r(spec, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+        const char *item = t; int deref = 0; while (*t == '*') { deref++; t++; }
+        char *p = t; while (*p && *p != '+' && *p != ':' && *p != '>') p++;
+        char name[64]; snprintf(name, sizeof name, "%.*s", (int)(p - t), t);
+        uint64_t a = 0;
+        if (!strcmp(name, "sp")) a = sp;
+        else for (int k = 0; k < g_nmod; k++) if (!strcmp(g_mod[k].name, name)) a = (uint64_t)(uintptr_t)g_mod[k].base;
+        if (!a) { fprintf(stderr, "[dm] peek %s: no module %s\n", item, name); continue; }
+        if (*p == '+') a += strtoull(p + 1, &p, 16);
+        unsigned words = 12, n = 1; uint64_t next = 0;
+        if (*p == ':') words = (unsigned)strtoul(p + 1, &p, 10);
+        if (*p == '>') { next = strtoull(p + 1, &p, 16); if (*p == 'x') n = (unsigned)strtoul(p + 1, &p, 10); }
+        if (words > 64) words = 64;
+        if (n > 4096) n = 4096;
+        int ok = 1;
+        for (int d = 0; d < deref && ok; d++) ok = peek_word(a, &a) && a;
+        if (!ok) { fprintf(stderr, "[dm] peek %s: unreadable pointer\n", item); continue; }
+        for (unsigned b = 0; b < n; b++) {
+            fprintf(stderr, "[dm] peek %s [%u] %#llx:", item, b, (unsigned long long)a);
+            uint64_t w = 0;
+            for (unsigned k = 0; k < words; k++) { if (!peek_word(a + 8 * k, &w)) { fprintf(stderr, " unreadable"); break; } off("", w); }
+            fputc('\n', stderr);
+            if (!next || !peek_word(a + next, &w) || !w) break;
+            a = w;
+        }
+    }
+}
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
@@ -179,6 +219,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
             else if (dladdr((void *)v, &di) && di.dli_sname && di.dli_fname && strstr(di.dli_fname, "dmhost")) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, di.dli_sname, (unsigned long long)(v - (uint64_t)di.dli_saddr)); n++; }
         }
         fputc('\n', stderr); }
+    crash_peek(uc->uc_mcontext->__ss.__sp);
     if (g_dump_hook) g_dump_hook();
     _exit(128 + sig);
 }

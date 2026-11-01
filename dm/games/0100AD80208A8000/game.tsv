@@ -33,6 +33,9 @@ mem_reserve	0x1028000000
 mem_alias	0x1008000000
 mem_stack	0x10000000
 app_pool	0xCD500000
+# with a graphics-quality preset (ue_quality.tsv) the larger render targets need more than the Switch pool: at 4K the game mapped 3.05 GB of 3.21 GB in battle mode and its allocator
+# gave up entering a story fight (OnOutOfMemory, 33 MB). With 6 GB a player's 72-minute story session at 4K mapped 5.0 GB, still growing in 0.25 GB steps: 8 GB under a preset (hle_svc.c app_pool)
+ue_quality_app_pool	0x200000000
 # the NPDM declares 16 MB of system resource
 sys_resource	0x1000000
 # the game sets the near=0 depth mode (nvnDeviceSetDepthMode, `depth mode: near=0` in the log): the pipeline bases made before it runs (the NSP script's prebuild, the app's

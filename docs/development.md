@@ -334,6 +334,7 @@ The bundle holds what the IPA holds, with the Mac's shader libraries:
   Resources/aoc/<index>/     the DLC, when the folder has some
   Resources/pso/             an NVN game's pipeline archive made offline for this Mac's GPU (<arch>.mtl4a, prebuilt.tsv; --gpu none leaves it out)
   Resources/dm/              the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv, pso_manifest.tsv, c1_full.tsv, cb_extent.tsv, shader_pairs.tsv and pso_pairs.tsv, font/, env.txt (--env-file)
+  Resources/dm/ue_quality/   an Unreal game's graphics-quality paks, one folder per preset (the profile has ue_quality.tsv; below)
   Resources/AppIcon.icns
 ```
 
@@ -352,6 +353,16 @@ The launcher sets the host's environment from the bundle, as the iOS app's `main
 Why the host is a child process: macOS privacy checks (TCC) cover files on removable volumes. A launcher that hands its process over to the host, such as a shell script that `exec`s `dmhost`, got EPERM on every open on the external drive, with no prompt. That happened with ad-hoc and Developer ID signatures alike, and after `tccutil reset`. A compiled launcher as `CFBundleExecutable` that `posix_spawn`s `dmhost`, which sits beside it in `Contents/MacOS`, can read those files. An app that sits on the game drive needs this, and so does an env file that points at files there.
 
 Signing: `pack_app.py` signs the inner host first, then the bundle (`codesign --force --sign <identity>`). It signs ad-hoc by default; `--mac-sign "<identity>"` (`MAC_SIGN` in Spyder) names a Developer ID or another identity. It never uses the hardened runtime: `--options runtime` refuses the executable memory the host maps for the game's code. Notarization needs the hardened runtime, so the app is not notarized. Gatekeeper blocks it on a Mac it was downloaded to until it is allowed in System Settings › Privacy & Security. `dm/tools/tests/test_nsp_mac_app.py` tests the packer and the launcher with a stand-in host, without game files.
+
+### Unreal graphics quality
+
+An Unreal game reads its device-profile console variables (resolution, shadow size, texture filtering) from cooked `.ini` files in a pak at boot. Writing a console variable into the game's memory later does not reach the renderer (it reads a scalability cache), and `r.setres` is a command, so a preset has to be what the game boots with. A profile with `ue_quality.tsv` ([format](../dm/games/README.md)) therefore gets presets as files:
+
+1. The NSP script (mac-app) runs `dm/tools/ue_quality.py <id> <RomFS> <out> <host> <modules>`. For each preset it finds the ini in the game's own paks (`uepak.py`; an Oodle-compressed ini goes through the game's Oodle in the host), applies the rows (a console variable's `+CVars=` line replaced or added; `TextureLODGroups` fields) and writes `<out>/<preset>/<pak directory>/<pak stem>_99_P.pak` with `uepak.write_pak`. It stops with a message when an ini, a section or a `TextureLODGroups` line is missing.
+2. `pack_app.py --ue-quality <out>` copies the folders to `Resources/dm/ue_quality/`. The iOS IPA does not carry them yet.
+3. The settings window's **Graphics quality** (`DM_UE_QUALITY`, `settings.tsv`; shown when the profile has the file) sets `DM_UE_QUALITY=<preset>`. The host (`hle_fs.c`, `rom_overlay_roots`) puts `<Resources/dm>/ue_quality/<preset>` in front of the `DM_ROMFS_OVERLAY` roots and logs `ue quality: preset <p> (<root>)`; a missing folder logs a `[RED]` line and the game starts without it. Unreal mounts a pak named `*_P.pak` with priority over the original, so the replaced ini wins. `off` (the default) or an empty value adds nothing.
+
+Measured on Demon Slayer 2: [its note](../dm/games/0100AD80208A8000/README.md#graphics-quality).
 
 ## Build and run on a device with Xcode
 
