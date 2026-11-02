@@ -37,6 +37,18 @@ The profile's `ue_quality.tsv` gives the settings window's **Graphics quality** 
 
 All three also set, in `SwitchConsole DeviceProfile`: `r.Shadow.MaxCSMResolution` 2048, `r.Shadow.DistanceScale` 1.0, `r.Shadow.CSM.MaxCascades` 3, `r.MaxAnisotropy` 8, `r.StaticMeshLODDistanceScale` 1.0, `r.SkeletalMeshLODRadiusScale` 1.0, `grass.CullDistanceScale` 1.0, `r.AmbientOcclusionRadiusScale` 0.8, `r.LightMaxDrawDistanceScale` 1.0, `r.Streaming.PoolSize` 1200; and in `Switch DeviceProfile` the texture groups filtered `linear` become `aniso` and mip filter `point` becomes `linear` (the point-filtered data groups stay). Handheld keeps the Switch values (only SwitchConsole changes resolution).
 
+Maximum also raises what the Switch's device profiles lower (`BaseSwitchDeviceProfiles.ini` sets most `sg.*` groups to 1, the game's profile `r.AmbientOcclusionMaxQuality` to 0), current, 2026-11-01: `r.AmbientOcclusionMaxQuality` 100, `r.AmbientOcclusionLevels` -1, `r.AmbientOcclusionRadiusScale` 1.0, `r.AmbientOcclusionMipLevelFactor` 0.4, `r.BloomQuality` 5, `r.Bloom.ScreenPercentage` 50, `r.LightShaftQuality` 1, `r.PostProcessing.DownsampleChainQuality` 1, `r.DiffusionFilter.HalfResolution` 0, `r.TranslucencyLightingVolumeDim` 64, `r.TranslucencyVolumeBlur` 1, `r.FXAA.Quality` 5, `r.MaxAnisotropy` 16, `r.StaticMeshLODDistanceScale` 0.5, `r.ViewDistanceScale` 2.0, `foliage.DensityScale` and `grass.DensityScale` 1.0, `foliage.MinLod` -1, `r.LandscapeLODDistributionScale` 1.0. Measured on the regression route at Maximum with the PC assets (headless; GPU time per frame in frames 6000-10500; one run each, shots aimed by frame number):
+
+| Set | GPU p50 / p99 (ms) | Over 16.6 ms (of 4,501) | Seen in the frame 9000 shot |
+|---|---|---|---|
+| Maximum before (3 runs) | 13.5-14.4 / 15.2-15.8 | 11-14 | |
+| The rows above (kept) | 13.88 / 15.97 | 14 | Fuller foliage (a nearer LOD), stronger ambient occlusion, a 64x64 lighting volume |
+| Shadows only: `r.Shadow.MaxResolution` and `MaxCSMResolution` 4096, `r.ShadowQuality` 5, `r.Shadow.RadiusThreshold` 0.01, 4 cascades, `r.ChangeSkeletalMeshShadowLODBias` 0 (left out) | 13.63 / 16.39 | 28 | The fight's shadow targets stay 2048x512 at that frame |
+| `r.DetailMode` 2, Niagara quality 3, `r.EmitterSpawnRateScale` 1, `r.ParticleLightQuality` 2 (left out) | 13.65 / 15.40 | 14 | No difference outside the characters (mean 0.13-0.21 of 255, against 2.4 for the post-processing rows); frames with effects were not comparable |
+| Every row together (left out) | 14.36 / 17.41 | 90 | |
+
+`@gpu_ms`'s median barely moves with the work: it stayed about 14.4 ms in the fight whatever was added, so it does not show the headroom; the frames over budget and the p99 separate the sets. The official app packed with these rows, on the route: no `[RED]` line, GPU p50 14.07 ms, p99 15.78 ms, 11 of 4,501 frames over 16.6 ms, footprint max 7.5 GB, 3,072 container reads. Not checked: story scenes with cascades, other stages' foliage at these distances, long sessions, the player's judgement on the TV.
+
 Measured (M4 Pro, headless, battle mode vs CPU on the snow stage, 45 s idle fight, per-frame GPU time, 60 fps target; run-to-run spread of one preset about ±0.5 ms):
 
 | Preset | Swap chain | GPU p50 / p95 / max (ms) | Late frames | Resident / GPU allocated (MB) |

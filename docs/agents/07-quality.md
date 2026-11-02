@@ -56,7 +56,7 @@ A pak read at boot avoids all of this. It holds the game's own `.ini`, edited, a
    - Watch `[mem] alias region mapped N GB (application pool P GB)` in long sessions at each preset.
    - Set `ue_quality_app_pool` with room to spare. Demon Slayer 2 mapped 5.0 GB after 72 minutes at 4K, still growing in 0.25 GB steps, so its preset pool is 8 GB.
    - This raises only the ceiling the game may map. The footprint follows what the game uses (6.5–7.3 GB there).
-7. **Measure.** Use a fixed route (Demon Slayer 2: battle mode against the CPU) for each preset. Read the per-frame `@gpu_ms` and `@itv` from `DM_NVN_TSV`, the timing lines, and the memory lines. Repeat the Switch preset to get the run-to-run spread (±0.5 ms there).
+7. **Measure.** Use a fixed route (Demon Slayer 2: battle mode against the CPU) for each preset. Read the per-frame `@gpu_ms` and `@itv` from `DM_NVN_TSV`, the timing lines, and the memory lines. Repeat the Switch preset to get the run-to-run spread (±0.5 ms there). Near the frame budget the median `@gpu_ms` stops showing the cost (Demon Slayer 2 stayed about 14.4 ms in a fight whatever a preset added): compare the frames over budget and the p99, and aim comparison shots by frame number (`DM_NVN_SHOT`) instead of by time.
 8. **Play long sessions.** Look at the slow windows (`timing up to frame N` with a high p95) and tell their two causes apart:
    - **GPU-bound:** GPU time over the frame budget with no new pipelines. A full-screen effect at 4K reached 18–27 ms on an M4 Pro. A lower preset helps; nothing else does.
    - **First-time pipelines:** `new pipelines … ms` in `[longframe]` lines. The device archive keeps them, so they do not come back.
