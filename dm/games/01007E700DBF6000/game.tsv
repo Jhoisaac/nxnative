@@ -1,0 +1,55 @@
+# MY HERO ONE'S JUSTICE 2: Byking / Bandai Namco, Unreal Engine 4.21, SDK 6, NVN, CRIWARE movies and sound; update 1.1.5 (v983040) with its add-ons.
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (its README.md); not tried on the iPhone
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	01007E700DBF6000
+program_id	01007E700DBF6000
+
+# ---- App ----
+name	MY HERO ONE'S JUSTICE 2
+ipa	MyHeroOnesJustice2.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v983040	1.1.5	main=29e1cd0fbb24697e379da855ca5c367b	subsdk0=31ed558beb51f9e273a569dab4f7db82	sdk=e29be8ad6778527aa248310d0c71a8a5
+package	v983040
+shader_versions	v983040
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	HeroGame/Content/Paks/HeroGame-Switch.pak
+zip_store	.pak:.png:.usm:.metallib
+
+# ---- Memory ----
+# Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. An iPhone needs the allocator cut for the build and a capped region (game_args), as Octopath Traveler 0's profile (docs/reference/memory.md)
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	MY HERO ONE'S JUSTICE 2 shaders (provisional profile)
+
+# heap check: 2026-11-03, no heap set
+
+# address regions: 2026-11-03, in its first 15 s in nnMain the game's regions reach alias +17.45 GB, within the profile's 64.00 GB alias region (what it takes later in play is not measured here) (rewrite b2488f3b2b14)
+
+# ---- Graphics ----
+# Unreal's texture streamer writes each streamed mip level straight into the texture's storage, in CPU_UNCACHED pools that need no flush, after the texture is
+# created; without both keys the stage walls were random-colour block mosaics (found on 1.1.2, as DRAGON BALL Z: KAKAROT). Frame rate: the game's own FixedFrameRate=60, present interval 1
+tex_flush_upload	on
+tex_dirty_upload	on
+
+# The game sets NVN's near = 0 depth mode, so the pipeline bases made before it runs (the app's offline archive) take the main0_z vertex entries;
+# without this key they were made for near=-w and no draw found them (the log's "pipeline archive bundled with the app: made for ... depth near=-w").
+depth_mode	zero
+
+# ---- Graphics quality ----
+# The application pool reported under a preset (ue_quality.tsv): Unreal's allocator budgets against it, and the Switch's 3.21 GB does not fit 4K targets (docs/agents/07-quality.md)
+ue_quality_app_pool	0x200000000

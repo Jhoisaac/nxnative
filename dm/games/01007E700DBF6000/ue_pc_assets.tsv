@@ -1,0 +1,4 @@
+# The PC build's top texture mips for a preset, from the player's own copy (dm/tools/ue_pc_paks.py, the NSP script's --ue-pc-paks): each Switch mip is the PC mip of its size, swizzled, byte for byte, and the Switch cook stripped the top one.
+# Columns, separated by tabs: preset, textures, pattern (fnmatch on the package path without the extension, case-insensitive).
+# The full set: the pilot (one stage and the fight's two characters) was played on the player's own display on 2026-11-03 with no defect.
+max	textures	HeroGame/Content/*

@@ -92,7 +92,7 @@ def build(game_id, romfs, out, host, modules):
             for p, (pak, files) in by_pak.items():
                 rel = os.path.relpath(p, romfs); stem = os.path.basename(rel)[:-4]
                 dest = os.path.join(d, os.path.dirname(rel)); os.makedirs(dest, exist_ok=True)
-                f = os.path.join(dest, f'{stem}_99_P.pak'); uepak.write_pak(f, pak.mount, files); size += os.path.getsize(f)
+                f = os.path.join(dest, f'{stem}_99_P.pak'); uepak.write_pak(f, pak.mount, files, pak.version); size += os.path.getsize(f)
             report.append(f'{preset}: {sum(len(v[1]) for v in by_pak.values())} ini file(s) in {len(by_pak)} pak(s), {size:,} bytes')
     finally:
         dec.close()

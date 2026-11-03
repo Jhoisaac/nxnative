@@ -1,0 +1,25 @@
+# Graphics-quality presets for an Unreal game, chosen in the settings window (DM_UE_QUALITY; dm/tools/ue_quality.py builds one replacement pak per preset, dm/host/hle_fs.c mounts it).
+# The game reads its device-profile console variables from cooked .ini files in a pak at boot, so a preset is the same ini with edits, in a pak named <stem of the pak holding the ini>_99_P.pak
+# beside that pak (Unreal mounts _P paks with priority). Columns, separated by tabs: preset (the setting's value; "off" has no rows), ini path in the pak, section (without brackets), key, value.
+#   key = a console variable: the section's +CVars=<key>=<old> line is replaced, or +CVars=<key>=<value> is added at the end of the section
+#   key = TextureLODGroups: value is Field=Value[,Field=Value...]; every +TextureLODGroups=(...) line of the section gets those fields replaced
+#   a field written Old>New (MinMagFilter=linear>aniso) is replaced only where it is Old: the point-filtered groups (8- and 16-bit data, 2D pixels) stay point
+# A row that matches no ini, no section, or (TextureLODGroups) no line stops the build. Handheld (the Switch DeviceProfile) keeps the Switch values; only SwitchConsole changes resolution.
+high	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.setres	1920x1080
+high	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.DynamicRes.OperationMode	0
+high	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.ScreenPercentage	100
+high	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.MaxAnisotropy	8
+high	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Streaming.PoolSize	1600
+high	HeroGame/Config/DefaultDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	MinMagFilter=linear>aniso,MipFilter=point>linear
+veryhigh	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.setres	2560x1440
+veryhigh	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.DynamicRes.OperationMode	0
+veryhigh	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.ScreenPercentage	100
+veryhigh	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.MaxAnisotropy	8
+veryhigh	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Streaming.PoolSize	1600
+veryhigh	HeroGame/Config/DefaultDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	MinMagFilter=linear>aniso,MipFilter=point>linear
+max	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.setres	3840x2160
+max	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.DynamicRes.OperationMode	0
+max	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.ScreenPercentage	100
+max	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.MaxAnisotropy	16
+max	HeroGame/Config/DefaultDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Streaming.PoolSize	3000
+max	HeroGame/Config/DefaultDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	MinMagFilter=linear>aniso,MipFilter=point>linear,LODBias=1>0,MaxLODSize=2048>4096

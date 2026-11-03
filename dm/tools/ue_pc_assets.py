@@ -207,6 +207,9 @@ def build(game_id, romfs, paks, out, host, modules):
     import game
     g = game.load(game_id); tsv = g.table('ue_pc_assets.tsv')
     if not tsv.is_file(): raise Error(f'game profile {game_id} has no ue_pc_assets.tsv')
+    if not uepak.io_tocs(romfs):   # a game with no IoStore container: a pak game's packages cannot move between platforms, its texels can (ue_pc_paks.py)
+        import ue_pc_paks
+        return ue_pc_paks.build(game_id, romfs, paks, out)
     table = rows(tsv)
     if not table: raise Error(f'{tsv} has no rows')
     dec = uepak.Lazy(lambda: uepak.OodleHost(host, modules, os.environ))

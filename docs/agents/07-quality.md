@@ -42,7 +42,7 @@ A pak read at boot avoids all of this. It holds the game's own `.ini`, edited, a
    - the `+TextureLODGroups` lines (`MinMagFilter`, `MipFilter`, `LODBias`).
 
    The console profile inherits from `Switch` (`BaseProfileName`), so a resolution set in `SwitchConsole` wins over one set in `Switch`.
-3. **Check the pak version.** `write_pak` writes version 11 (UE 4.27 / 5.x): uncompressed, unencrypted, with a full directory index and no path hash index. An older engine needs the legacy layout, described in `uepak.py`'s format notes (My Hero One's Justice 2 is version 7, UE 4.21). Add that writer before profiling such a game.
+3. **Check the pak version.** `ue_quality.py` writes the replacement pak in the version of the pak it replaces files of, because an engine refuses a newer one: `write_pak` writes version 11 and the legacy 4, 7, 8 and 9 (My Hero One's Justice 2 is version 7, UE 4.21; `uepak.py`'s format notes).
 4. **Write the profile's `ue_quality.tsv`.** Its header gives the format.
    - Change only runtime variables that need no new shaders: the resolution, shadow map sizes, shadow distance and cascade count, LOD and draw distances, the texture pool, anisotropy and the texture-group filters.
    - Do not turn on features the game never cooked shaders for: TAA/TSR when it ships FXAA, SSR, depth of field, motion blur, separate translucency, distance-field AO, Lumen, Nanite or virtual shadow maps. Their shaders are missing, and draws fail or the game asserts.
@@ -96,3 +96,13 @@ Checks for a new game:
 3. Boot with the preset and check that the game reads `<stem>_99_P.ucas` when the chosen packages load, that no `[RED]` line appears, and the memory lines (`[mem] alias region mapped`, `DM_MEMSTAT`).
 4. Compare a scene with and without the container, with the same `ue_quality.tsv` rows in both, and once with the textures only. A lightmap package changes the scene's lighting, not only its detail, so judge it on its own.
 
+## Pak games
+
+A game with no IoStore container cannot take another platform's packages: `ue_pc_assets.py` hands such a game to `dm/tools/ue_pc_paks.py`. What moves is the texel data. On My Hero One's Justice 2 (UE 4.21, pak version 7), each Switch mip is the PC mip of its size, swizzled, byte for byte; the Switch's are block-linear in the shape of 64 KB tiles (8 GOBs for 8- and 16-byte blocks, shrinking with the level's rows) and the PC's linear, and the cook stripped the top one (`FirstMip` 1 there, 0 on the PC).
+
+- The tool keeps the Switch package and adds the mip: the entry in the `.uexp`, the swizzled data in the `.ubulk` (or inline), then the bulk offsets, `SkipOffset`, the export's `SerialSize` and `SerialOffset`, and the summary's `BulkDataStartOffset`.
+- A texture is taken only when its next level, swizzled by the same rule, equals the Switch's own, so a wrong rule or another encode never reaches the game. A cube or array keeps the Switch's.
+- The output joins the preset's `<stem>_99_P.pak` in Zlib blocks of 64 KB (`uepak.LegacyPakWriter`). An encrypted PC index needs its key: the tool finds it in the build's executable and keeps it in memory. It is never printed or written.
+- The preset's rows set `LODBias=1>0` and `MaxLODSize=2048>4096` for those groups, with a larger `r.Streaming.PoolSize`.
+
+Check a new game as in [PC textures](#pc-textures): which packages a route reads (`DM_FSLOG`, offsets to `Pak.files`), the pak in the log, a pilot first.
