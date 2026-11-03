@@ -77,9 +77,9 @@ The player's session of 2026-11-02 on the 4K TV, against the certification sessi
 
 Open from this session:
 
-- **The application pool is thin.** The game's allocator reached 7.51 of 8 GB at 110 minutes, growing about 0.25 GB per 20-30 minutes late in the session. Its earlier out-of-memory abort came at 3.03 of 3.21 GB, 94% of the pool, and 94% of 8 GB is 7.55 GB. A session of about 3 hours may abort the same way (an extrapolation). Whether the growth is the game's own or a leak is not known. A larger `ue_quality_app_pool` should move the ceiling; not tried.
+- **The application pool is thin.** The game's allocator reached 7.51 of 8 GB at 110 minutes, growing about 0.25 GB per 20-30 minutes late in the session. Its earlier out-of-memory abort came at 3.03 of 3.21 GB, 94% of the pool, and 94% of 8 GB is 7.55 GB. A session of about 3 hours may abort the same way (an extrapolation). Whether the growth is the game's own or a leak is not known. A larger `ue_quality_app_pool` should move the ceiling; not tried. The player's decision: raise it only if this abort happens (`FGenericPlatformMemory::OnOutOfMemory` in the log).
 - **Heavy GPU moments.** 375 frames with GPU over 20 ms in 106 clusters, up to 103 ms, with no new pipelines. The largest start at about 9, 25, 38, 64, 66, 71 and 99 minutes. The log does not name the scenes. These are the scenes the node survey did not reach.
-- **The crash.** The session had no crash and no hit of the crash probes. The log does not show whether Zenitsu vs Daki was played, so that crash stays open.
+- **The crash.** The session had no crash and no hit of the crash probes, and the player reports playing the same fights, Zenitsu vs Daki among them. One clean session does not close it: it came earlier on retries, so it stays open.
 
 ## Repeating the pass on another machine
 
