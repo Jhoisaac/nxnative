@@ -49,6 +49,12 @@ def apply(text, section, edits, ini='the ini'):
                 if touched: lines[i] = m.group(1) + body + m.group(3); hit += 1
             if not hit: raise Error(f'{ini}: [{section}] has no +TextureLODGroups line')
             continue
+        if key.startswith('='):   # a plain key of a settings section (bUseFixedFrameRate in /Script/Engine.Engine): each of its lines in the section takes the value
+            hit = 0
+            for i in range(start + 1, end):
+                if lines[i].startswith(key[1:] + '='): lines[i] = f'{key[1:]}={value}' + (lines[i][len(lines[i].rstrip('\r\n')):] or nl); hit += 1
+            if not hit: raise Error(f'{ini}: [{section}] has no line {key[1:]}=')
+            continue
         pat = re.compile(r'\+CVars=' + re.escape(key) + r'=')
         i = next((i for i in range(start + 1, end) if pat.match(lines[i])), None)
         if i is not None:
@@ -92,7 +98,7 @@ def build(game_id, romfs, out, host, modules):
             for p, (pak, files) in by_pak.items():
                 rel = os.path.relpath(p, romfs); stem = os.path.basename(rel)[:-4]
                 dest = os.path.join(d, os.path.dirname(rel)); os.makedirs(dest, exist_ok=True)
-                f = os.path.join(dest, f'{stem}_99_P.pak'); uepak.write_pak(f, pak.mount, files); size += os.path.getsize(f)
+                f = os.path.join(dest, f'{stem}_99_P.pak'); uepak.write_pak(f, pak.mount, files, pak.version); size += os.path.getsize(f)
             report.append(f'{preset}: {sum(len(v[1]) for v in by_pak.values())} ini file(s) in {len(by_pak)} pak(s), {size:,} bytes')
     finally:
         dec.close()

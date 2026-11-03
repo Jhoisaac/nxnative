@@ -40,6 +40,7 @@
 #   index with the encoded entries (bits 29-31 set: offset, raw size fit 32 bits; method 0) and a FULL DIRECTORY INDEX that also lists every parent directory (the engine looks a file up by walking
 #   its directories, and an empty parent entry is what lets it find "A/B/C/f" under "A/" and "A/B/"). No path hash index is written (flag 0): the engine falls back to the directory index, and
 #   the hash (CityHash64 of the lower-case path with a seed) is then not needed. The index is two blocks, primary then directory; the primary holds the directory index's own offset, so it is built twice.
+#   Versions 4, 7, 8 and 9 write the legacy layout above: the per-file index in one block, each entry's FPakEntry with method 0 and no blocks, the footer of that version (a version 9 pak with the frozen flag clear).
 # Writing an IoStore container (write_toc, for a patch container the game mounts over its own: Unreal's loader gives a container mounted later, such as <stem>_P.utoc, priority over the earlier ones):
 #   TOC version 5, blocks of 64 KB, no directory index (size 0, flag 8 clear), no encryption or signing; flag 1 when any block is Oodle-compressed (method names: "Oodle" only). The chunks are stored in
 #   perfect hash slot order (io_perfect_hash: seed count ceil(n / 2), no overflow list), each chunk's offset in the uncompressed stream a multiple of 64 KB, its blocks in the .ucas 16-aligned.
@@ -321,11 +322,57 @@ class Pak:
             out.append(b); left -= k
         return b''.join(out)
 
-def write_pak(out, mount, files):
-    """An uncompressed, unencrypted version 11 pak (see "Writing" in the notes above) at out: files = [(path in the pak, bytes)], paths relative to mount (mount is "../../../" for the game's own).
+class LegacyPakWriter:
+    """A pak of a legacy version (4, 7, 8, 9) written file by file, for a replacement pak too large to hold in memory: add() stores a file, add_zlib() a file already split into Zlib blocks of block_size raw bytes.
+    The method is the flag 1 in versions 4 and 7, and the first name in the footer of versions 8 and 9. close() (or leaving the with block) writes the index and the footer"""
+    def __init__(self, out, mount, version):
+        import hashlib
+        if version not in LEGACY: raise ValueError(f'LegacyPakWriter: pak version {version}, only {", ".join(map(str, LEGACY))} are written')
+        self.sha1, self.version, self.mount = hashlib.sha1, version, mount
+        self.f, self.pos, self.idx, self.count, self.zlib = open(out, 'wb'), 0, bytearray(), 0, False
+    @staticmethod
+    def fstr(t): b = t.encode('utf-8') + b'\0'; return struct.pack('<i', len(b)) + b
+    def _entry(self, off, size, raw, meth, sha, blocks, bsz):
+        e = struct.pack('<qqqi', off, size, raw, meth) + sha
+        if meth: e += struct.pack('<i', len(blocks)) + b''.join(struct.pack('<qq', a, b) for a, b in blocks)
+        return e + struct.pack('<BI', 0, bsz)
+    def add(self, path, blob):
+        sha = self.sha1(blob).digest()
+        self.idx += self.fstr(path) + self._entry(self.pos, len(blob), len(blob), 0, sha, (), 0)
+        head = self._entry(0, len(blob), len(blob), 0, sha, (), 0)
+        self.f.write(head); self.f.write(blob); self.pos += len(head) + len(blob); self.count += 1
+    def add_zlib(self, path, chunks, raw, block_size):
+        h = self.sha1()
+        for c in chunks: h.update(c)
+        sha, size, nhead = h.digest(), sum(map(len, chunks)), 53 + 4 + 16 * len(chunks)
+        base = self.pos if self.version < 5 else 0   # block offsets: from the file start before version 5, from the entry after
+        blocks, at = [], nhead
+        for c in chunks: blocks.append((base + at, base + at + len(c))); at += len(c)
+        self.zlib = True
+        self.idx += self.fstr(path) + self._entry(self.pos, size, raw, 1, sha, blocks, block_size)
+        head = self._entry(0, size, raw, 1, sha, blocks, block_size)
+        self.f.write(head)
+        for c in chunks: self.f.write(c)
+        self.pos += nhead + size; self.count += 1
+    def close(self):
+        idx = self.fstr(self.mount) + struct.pack('<i', self.count) + bytes(self.idx)
+        foot = (b'' if self.version == 4 else bytes(16)) + struct.pack('<BIiqq', 0, PAK_MAGIC, self.version, self.pos, len(idx)) + self.sha1(idx).digest()
+        if self.version >= 8: foot += bytes(self.version == 9) + (b'Zlib'.ljust(32, b'\0') if self.zlib else bytes(32)) + bytes(32 * 4)   # no frozen index; the method names
+        self.f.write(idx); self.f.write(foot); self.f.close()
+    def __enter__(self): return self
+    def __exit__(self, *a): self.close()
+
+def write_pak(out, mount, files, version=11):
+    """An uncompressed, unencrypted pak (see "Writing" in the notes above) at out: files = [(path in the pak, bytes)], paths relative to mount (mount is "../../../" for the game's own). version: 11, or
+    4, 7, 8, 9 (the legacy per-file index) for an engine that reads no later one: an engine refuses a pak newer than itself, so a replacement pak takes the version of the pak it replaces files of.
     A game mounts a pak named <stem of another>_99_P.pak beside it with priority over the original (Unreal's patch paks), so the files here replace those of the same path"""
     import hashlib
     def fstr(t): b = t.encode('utf-8') + b'\0'; return struct.pack('<i', len(b)) + b
+    if version != 11 and version not in LEGACY: raise ValueError(f'write_pak: pak version {version}, only {", ".join(map(str, LEGACY))} and 11 are written')
+    if version in LEGACY:
+        with LegacyPakWriter(out, mount, version) as w:
+            for path, blob in files: w.add(path, blob)
+        return
     data, recs = bytearray(), []
     for path, blob in files:
         off = len(data)

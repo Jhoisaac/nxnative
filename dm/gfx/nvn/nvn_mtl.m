@@ -4567,6 +4567,7 @@ static void udc_note_draw(NvProg *pr) {
 // Metroid Dread's depth prepass calls BindProgram(program, vertex | fragment), then BindProgram(null, fragment): only the vertex shader remains and depth is drawn.
 // Every bind used to replace S.prog as a whole, a null program meant "no program bound", and the prepass's ~140 draws per frame were all dropped: depth stayed empty, the G-buffer's depth EQUAL test passed no pixel, and scenes and characters were black.
 // When every stage comes from the same program, that program is the effective one (all of Mario's and Engage's binds are like this, so nothing changes for them); otherwise a composite is made: a host-made prog_t carrying only a serial, whose NvProg in the serial table takes each stage from its source program (a null fragment = a vertex-only pipeline)
+static uint64_t g_cp_made;   // combinations made: a walk ahead that replays binds stops before it could reuse a ring slot its jobs hold (geo_run_walk)
 static const prog_t *bind_stages(const prog_t *p, int stages) {
     for (int st = 0; st < 5; st++) if (stages >> st & 1) S.bst[st] = p;
     const prog_t *v = S.bst[0];
@@ -4580,6 +4581,7 @@ static const prog_t *bind_stages(const prog_t *p, int stages) {
         if (hit) return &cp[i];
     }
     int i = ncp < NCMP ? ncp++ : next++ % NCMP;
+    g_cp_made++;
     if (cp[i].serial) serial_del(cp[i].serial);
     NvProg *o = [NvProg new];
     for (int st = 0; st < 5; st++) { ck[i][st] = S.bst[st]; cs[i][st] = S.bst[st] ? S.bst[st]->serial : 0; if (S.bst[st]) { __unsafe_unretained NvProg *src = prog_get(S.bst[st]); o->sh[st] = src ? src->sh[st] : nil; } }

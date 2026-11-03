@@ -1,0 +1,40 @@
+# Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles (`0100309016E7A000`)
+
+Update 1.53 (v589824, `main` build `14c878ecca9d7cb5b57e9b492b1bdb92`) with its add-ons, SDK 9. CyberConnect2's game on Unreal Engine 4.25 (`pakchunk0-Switch.pak`, pak version 9 with a frozen index, and IoStore containers) on NVN.
+
+## What it needs
+
+| Setting | Where | Why |
+|---|---|---|
+| `mem_reserve 0x1028000000`, `mem_alias 0x1000000000` | `game.tsv` | Unreal's address reservation |
+| `sys_resource 0x1000000` | `game.tsv` | the NPDM declares 16 MB of system resource |
+| `shader_groups ShaderArchive-Global-=global ShaderArchive-=game` | `game.tsv` | the decoded shader code archives |
+
+## Graphics quality
+
+`ue_quality.tsv` gives the settings window's **Graphics quality** row: Switch (off), High (1080p), Very high (1440p), Maximum (4K). The cvars come from `APK/Platforms/Switch/Config/SwitchDeviceProfiles.ini` in `pakchunk0-Switch.pak`; a preset is `pakchunk0-Switch_99_P.pak`, version 9 with the frozen flag clear ([how](../../../docs/agents/07-quality.md)). Current, Mac only. The Switch asks 1600x900, `LODBias=1`, linear filtering, `r.Shadow.MaxResolution` 256, `r.Shadow.MaxCSMResolution` 800, `r.MaxAnisotropy` 1. All three presets set `r.Shadow.MaxResolution` 1024, `r.Shadow.MaxCSMResolution` 2048, anisotropic filtering (8x; 16x at Maximum) and a larger texture pool. `ue_quality_app_pool` is 8 GB. Results: [quality reference](quality-reference.md).
+
+There are no movies in the RomFS: the cutscenes are in the engine. The first scene runs at 3840x2160 in the pass dump; the other scenes are not sampled.
+
+## Frame rate
+
+Current: every preset plays at 60 fps, with no change to the game's code. The Switch preset stays at 30. `ue_quality.tsv` sets `=FixedFrameRate` 60 in `/Script/Engine.Engine` (`DefaultEngine.ini`), `rhi.SyncInterval` 1 in `SwitchConsole`, and `=MaxFrameRateUsedInCinema` and `=MaxFrameRateUsedInStandDemo` 60 (`DefaultGame.ini`, `APKDemoManager` and `APKDemo`), the two limits that held cinematics at 30. The game's code knows both rates: it compares `FixedFrameRate` with 60 and picks its constants for 1/60 or 1/30 (main+0x2b892b0, main+0x2c92fb0, main+0x23c9c14).
+
+The game steps by a fixed 1/`FixedFrameRate` per frame, so a frame rate under 60 slows the game instead of dropping frames: a walk at 30 fps covered half the ground, which first looked like a wrong game speed. It was the GPU: 35.9 ms a frame at 3840x2160 in the wisteria path's wide view, 122 render passes, 8.1 GB of attachment traffic a frame. The cause was the host's: [Geometry-shader draws split a pass](../../../docs/reference/rendering.md#geometry-draws-keep-the-render-pass-across-ordinary-draws). With that fixed, the same view takes about 14 ms.
+
+Speed checked by the clock: a 3 s walk ends at the two guides as at 30 fps, and a cinematic at 58 fps shows the same shot as at 30 fps at the same second. Sound was off in those runs: lip and voice sync are not checked.
+
+`hle_fpslock.c` has no row for this build: nothing at run time was found to change these values in the scenes tested. The addresses, should a scene need them: `t.MaxFPS` object main+0xb314820, `rhi.SyncInterval` object main+0xb1c6988, GEngine main+0xb314540 with `FixedFrameRate` at +0x7fc, and the setters of `APKGameInstance` that write it at main+0x1a3e5fc, +0x1a40048, +0x1a5b778, +0x1a5ccb8, +0x1fe0e78, +0x200cb20, +0x2485d60 (found by disassembly only).
+
+### The player's session
+
+Current: 75 minutes on 2026-11-03 at Maximum, fullscreen at 3840x2160, story and fights on the first app with these settings (267,847 frames): 0.43% of the frames dropped, GPU median 13.7 ms, peak footprint 7.5 GB, 0 audio underruns, exit 0. The one red line is the audio device changing at frame 14,700; the AudioUnit restarted by itself.
+
+What the player saw as drops: first-time pipelines hold 19 of the 28 moments under about 50 fps after boot, and about 70% of all the time lost (worst frame 729.8 ms, frame 258859). Most of the rest are short game-side stalls with no pipeline (0.6 s, frames up to 88 ms, at frames 139500 and 158114). Separately, a few scenes cost real GPU: 18.5 ms at frames 195601-196500 (about 56 fps), 17.5 ms at frames 61801-62400 and 216601-216900. Which screens those are is not known yet: the log does not name them.
+
+Pipelines: the log said `pipeline archive bundled with the app: made for ... depth near=-w ... this run needs ... near=0`. The profile had no `depth_mode`, so the 657 MB archive served no draw and the session compiled 1,783 bases, 73.5 s of compiler time, against 88 bases in a 498,900 frame session of Demon Slayer 2. The profile now has `depth_mode zero` and a prewarm list of 3,877 lines from this session. Not measured yet: the archive built with the key.
+
+## Found on this game
+
+- [Geometry draws keep the render pass across ordinary draws](../../../docs/reference/rendering.md#geometry-draws-keep-the-render-pass-across-ordinary-draws): 20 ms of GPU work a frame at 4K, its outline passes.
+- [Frozen pak index](../../../docs/reference/shaders.md#unreal-engine-421-to-425-paks-versions-7-8-and-9-and-425-iostore-containers): the shader reader for its version 9 pak and 4.25 containers.
