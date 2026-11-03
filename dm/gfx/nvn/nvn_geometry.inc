@@ -298,6 +298,14 @@ static geo_access geo_access_of(NvProg *pr, NvShader *gs) {
         if (sh->rf.drv_read[0]) a.unknown=1;
         for (int i=0;i<sh->rf.nb;i++) {
             const nvn_rbind *b=&sh->rf.b[i];
+            // A buffer texture in a texture slot is read from its own memory range (Unreal's vertex factories read their streams this way)
+            if ((b->kind==NVN_RB_TEX || b->kind==NVN_RB_TBUF) && (b->kind==NVN_RB_TBUF || b->dtt==MTLTextureTypeTextureBuffer) && !b->rw) {
+                int tid=(int)(tex_slot_h(S.tex[st],S.img[st],b->reg)&0xfffff);
+                const tex_t *t=tid>0 && tid<g_ntreg && g_treg[tid].ok ? &g_treg[tid].t : NULL;
+                if (t && t->d.target==NVN_TEXTURE_TARGET_BUFFER && t->mem && t->L.size) geo_access_add(&a,(uint64_t)t->mem,t->L.size,0);
+                else a.unknown=1;
+                continue;
+            }
             if ((b->kind==NVN_RB_TEX || b->kind==NVN_RB_TEXU || b->kind==NVN_RB_TEXD || b->kind==NVN_RB_TEXA) && b->dtt==MTLTextureTypeTextureBuffer) a.unknown=1;
             if (b->kind==NVN_RB_CBUF || b->kind==NVN_RB_UBOP || b->kind==NVN_RB_SBUFP || b->kind==NVN_RB_TEXU || b->kind==NVN_RB_SAMPU) {
                 if (b->reg>=16) { a.unknown=1; continue; }
@@ -471,7 +479,7 @@ typedef struct {
 } geo_job;
 enum { GEO_RUN = 64 };
 static geo_job g_geo_run[GEO_RUN];
-static int g_geo_nrun;
+static int g_geo_nrun, g_geo_run_mixed;
 static uint64_t g_geo_dependency_splits;
 static int g_geo_query_run = -1;
 static int g_geo_cut_on = -1;
@@ -671,7 +679,7 @@ static void geo_raster(const geo_job *j, int last_in_run) {
     }
     g_geo_vrange = j->lean ? &j->vertex_range : NULL; g_geo_count = j->direct_count;
     g_geo_program = raster; g_geo_indices = j->packed; g_geo_index_bytes = j->packed_size; g_geo_args = j->args;
-    g_geo_omit_colors = !(j->reader->layer_out) && geo_color_omit();
+    g_geo_omit_colors = !(j->reader->layer_out) && !g_geo_run_mixed && geo_color_omit();
     if (g_geo_omit_colors) g_geo_color_omits++;
     args_dirty_all();
     p_draw synthetic = {.prim = j->gs->geo_output == 1 ? 0 : j->gs->geo_output == 6 ? 1 : 4, .count = 3, .instances = 1, .base_instance = (int32_t)j->first_instance};
@@ -696,32 +704,54 @@ static int geo_run_passes(uint32_t op, const void *a) {
     if (op == OP_SIGNAL_EVENT) return 1;
     return state_op(op, a);
 }
+// Ordinary draws between two geometry draws of a pass stay in order in the render pass: only the geometry draws' captures and kernels move ahead of them, so the pass does not
+// reload its attachments per geometry draw (Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles: 44 of 1,211 draws a frame, 66 passes at 3840x2160, about 20 ms of 30 ms of GPU work).
+// Moved work must not see or hide an ordinary draw's memory effects, so neither side may write storage or images, and a kernel with an unknown range stays where it is.
+// The run keeps every attachment (no colour omission). DM_NVN_GEO_MIX=0 ends the run at an ordinary draw
+static int geo_mix_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_GEO_MIX"); on = !e || strcmp(e, "0"); } return on; }
+static uint64_t g_geo_mixed_draws;
+static int geo_prog_writes(NvProg *pr) {
+    for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP)) return 1; }
+    return 0;
+}
+static int geo_job_movable(const geo_job *j) { return !j->access.writes && !j->access.unknown && !geo_prog_writes(j->pr); }
 static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
-    int n = 1;
+    int n = 1, mixed = 0; uint64_t plain = 0, plain_run = 0, cp0 = g_cp_made;
+    g_geo_run_mixed = 0;
     if (!geo_hoist_on() || S.tf_on || g_geo_split_depth || g_defer_replaying || !g_exec_next || g_ret_n > 8) return n;
     typeof(S) s0 = S; typeof(R) r0 = R; int pd = g_pso_dirty, dd = g_dss_dirty;
     fz_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n}; memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
     const uint8_t *p; op_hdr h; const void *a;
     for (int guard = 0; guard < 10000 && n < GEO_RUN && fz_next(&cur, &p, &h, &a); guard++) {
-        if (geo_run_passes(h.op, a)) continue;
+        if (geo_run_passes(h.op, a)) { if (g_cp_made - cp0 >= 32) break; continue; }   // half the combined-program ring: the slots the jobs and S hold stay theirs
         if (h.op != OP_DRAW && h.op != OP_DRAW_IDX) break;
         p_draw dt; p_draw_idx it;
         const p_draw *dw = h.op == OP_DRAW ? draw_rec(a, h.size, &dt) : NULL;
         const p_draw_idx *di = h.op == OP_DRAW_IDX ? draw_idx_rec(a, h.size, &it) : NULL;
         if ((dw && dw->mdi_cnt) || (di && di->mdi_cnt)) break;
         NvProg *pr = S.prog ? prog_get(S.prog) : nil;
-        if (!pr || !pr->sh[2] || !pr->sh[2]->geo_vertices) break;
+        if (!pr) break;
+        if (!pr->sh[2] || !pr->sh[2]->geo_vertices) {
+            int ok = geo_mix_on() && !geo_prog_writes(pr);
+            for (int i = 0; ok && i < n; i++) ok = geo_job_movable(&g_geo_run[i]);
+            if (!ok) break;
+            plain_run++; continue;
+        }
         if (geo_mesh_fn(pr, dw, di)) break;
         int r = geo_prep(pr, dw, di, &g_geo_run[n], 0, 0);
         if (r <= 0) break;
+        if (plain_run && !geo_job_movable(&g_geo_run[n])) break;
         int conflict=0;
         for (int i=0;i<n;i++) if (geo_access_conflict(&g_geo_run[i].access,&g_geo_run[n].access)) { conflict=1; break; }
         if (conflict) { g_geo_dependency_splits++; break; }
         g_geo_run[n].op = p;
         geo_capture_one(re, &g_geo_run[n]);
         n++;
+        if (plain_run) { mixed = 1; plain += plain_run; plain_run = 0; }
     }
-    S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd;
+    S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; prog_resolve();
+    g_geo_run_mixed = mixed; g_geo_mixed_draws += plain;
     return n;
 }
 static void geo_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) { cp_stamp start = cp_begin(); geo_draw_(pr, dw0, di0, primitive_base); cp_end(6, start); }
@@ -767,7 +797,7 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
         if (g_geo_split_compute) { enc_c_end(ce); ce = nil; }
         packs += g_geo_run[i].emits != 0 && !g_geo_run[i].direct_count;
     }
-    if (n > 1) { S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; }
+    if (n > 1) { S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; prog_resolve(); }
     int legacy = geo_pack_legacy(), small = 0;
     for (int i = 0; i < n; i++) if (!legacy && g_geo_run[i].emits && !g_geo_run[i].direct_count && g_geo_run[i].groups <= 1024) small++;
     if (small) {

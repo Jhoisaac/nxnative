@@ -97,8 +97,58 @@ static void dependency(int uniform) {
     EXPECT("geometry boundary submits early only when enabled",cut_draws()==1&&geo_cut_on(),g_cuts>cuts);
     mtl_tex_release(&target);mtl_pool_del(cmd);mtl_drain();free(cmd);
 }
+// geo_access_of on a read-only buffer texture: the registered texture's memory is a read range, an unregistered slot makes the access unknown.
+static void access_tbuf(void) {
+    NvProg *pr=[NvProg new];NvShader *vs=[NvShader new];vs->stage=0;pr->sh[0]=vs;vs->rf.nb=1;vs->rf.b[0]=(nvn_rbind){.kind=NVN_RB_TBUF,.reg=0};
+    state_reset();geo_access a=geo_access_of(pr,nil);EXPECT("unregistered buffer texture slot gives unknown access",1,a.unknown);
+    if(g_ntreg<8){g_treg=realloc(g_treg,8*sizeof *g_treg);memset(g_treg+g_ntreg,0,(8-g_ntreg)*sizeof *g_treg);g_ntreg=8;}
+    treg_t *r=&g_treg[5];memset(r,0,sizeof *r);r->ok=1;r->t.d.target=NVN_TEXTURE_TARGET_BUFFER;r->t.mem=(void*)0x5000;r->t.L.size=256;
+    S.tex[0][0]=5;a=geo_access_of(pr,nil);
+    EXPECT("registered buffer texture is one known read range",1,a.unknown==0&&a.n==1&&a.writes==0&&a.r[0].lo==0x5000&&a.r[0].hi==0x5100&&!a.r[0].write);
+    vs->rf.b[0].kind=NVN_RB_TEX;vs->rf.b[0].dtt=MTLTextureTypeTextureBuffer;a=geo_access_of(pr,nil);
+    EXPECT("texture-typed buffer texture reads the same range",1,a.unknown==0&&a.n==1&&a.r[0].lo==0x5000);
+    r->ok=0;a=geo_access_of(pr,nil);EXPECT("a retired buffer texture gives unknown access",1,a.unknown);
+    memset(r,0,sizeof *r);state_reset();
+}
+// A geometry run continues across an ordinary draw (mixed run): both geometry draws join one run, and the ordinary draw still rasters between them.
+static void mixed(void) {
+    id<MTLLibrary> l=library(@"#include <metal_stdlib>\nusing namespace metal;\n"
+      "struct C{device float*dst;uint4 info;};\n"
+      "vertex float4 unused(){return float4(0,0,0,1);}\n"
+      "vertex void capture(uint v[[vertex_id]],constant C&c[[buffer(13)]]){c.dst[0]=1.0;}\n"
+      "struct G{device float*in[[id(0)]];device float4*out[[id(1)]];device uint*ix[[id(2)]];constant uint4*info[[id(3)]];device uint*map[[id(4)]];};\n"
+      "kernel void geometry(constant G&g[[buffer(0)]],uint3 t[[thread_position_in_grid]]){if(t.x||t.y||t.z)return;float x=-.8;g.out[0]=float4(x,-.5,0,1);g.out[1]=float4(x+.6,-.5,0,1);g.out[2]=float4(x,.5,0,1);g.ix[0]=0;g.ix[1]=1;g.ix[2]=2;g.ix[3]=0xffffffffu;}\n"
+      "struct V{device float4*p[[id(0)]];};vertex float4 reader(uint v[[vertex_id]],constant V&a[[buffer(0)]]){return a.p[v];}\nfragment float4 red(){return float4(1,0,0,1);}\n"
+      "vertex float4 half_quad(uint v[[vertex_id]]){float2 p[3]={float2(-1,-1),float2(1,-1),float2(-1,3)};return float4(p[v]*float2(.5,1)+float2(-.5,0),0,1);}\n"
+      "fragment float4 green(){return float4(0,1,0,1);}\n");
+    int helpers[]={0,1,2,3,4},rh[]={1};NvProg *pr=[NvProg new],*ob=[NvProg new];
+    pr->sh[0]=shader(l,@"unused",0,NULL,0);NvShader *vs=pr->sh[0];vs->geo_fn=[l newFunctionWithName:@"capture"];
+    pr->sh[1]=shader(l,@"red",1,NULL,0);pr->sh[2]=shader(l,@"geometry",2,helpers,5);NvShader *gs=pr->sh[2];
+    strcpy(gs->key,"fedcba9876543211_b");gs->geo_vertices=3;gs->geo_invocations=1;gs->geo_output=7;gs->geo_stride=4;gs->geo_index_stride=4;
+    ob->sh[0]=shader(l,@"half_quad",0,NULL,0);ob->sh[1]=shader(l,@"green",1,NULL,0);
+    g_shcache=[NSMutableDictionary dictionary];g_shcache[@"fedcba9876543211_bg0"]=gs;g_shcache[@"fedcba9876543211_bgv"]=shader(l,@"reader",0,rh,1);
+    prog_t cp={.serial=9720},co={.serial=9721};serial_put(cp.serial,pr);serial_put(co.serial,ob);
+    uint8_t *cmd;posix_memalign((void**)&cmd,getpagesize(),65536);memset(cmd,0,65536);mtl_pool_add(cmd,65536);size_t used=0;
+    #define EMIT(OP,X) do{size_t z=(8+sizeof(X)+7)&~7ull;op_hdr h={OP,(uint32_t)z};memcpy(cmd+used,&h,8);memcpy(cmd+used+8,&(X),sizeof(X));used+=z;}while(0)
+    tex_t target={.magic=MAGIC('T','E','X',0),.serial=9820,.d={.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=32,.height=32,.depth=1,.levels=1,.samples=1}};
+    p_set_rt rt={.n=1};rt.color[0]=&target;EMIT(OP_SET_RT,rt);p_viewports vp={.n=1};vp.v[0][2]=vp.v[0][3]=32;EMIT(OP_VIEWPORTS,vp);
+    p_clear_color cl={.mask=15,.rgba={0,0,0,1}};EMIT(OP_CLEAR_COLOR,cl);
+    p_bind_program ba={&cp,7},bo={&co,7};p_draw dg={.prim=0,.count=1,.instances=1},dq={.prim=4,.count=3,.instances=1};
+    EMIT(OP_BIND_PROGRAM,ba);EMIT(OP_DRAW,dg);EMIT(OP_BIND_PROGRAM,bo);EMIT(OP_DRAW,dq);EMIT(OP_BIND_PROGRAM,ba);EMIT(OP_DRAW,dg);
+    op_hdr end={OP_END,8};memcpy(cmd+used,&end,8);
+    #undef EMIT
+    state_reset();memset(&R,0,sizeof R);mtl_set_frame(102);mtl_sub_begin();uint64_t h=(uint64_t)cmd;mtl_sub_index(&h,1);mtl_exec(cmd);
+    int nrun=g_geo_nrun,mixed_run=g_geo_run_mixed;   // read before finish(): the host keeps them until the next geometry draw
+    id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];[blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
+    uint8_t *px=rb.contents;
+    EXPECT("both geometry draws form one run across the ordinary draw",2,nrun);
+    EXPECT("the run is marked mixed",1,mixed_run);
+    EXPECT("second geometry draw rasters over the ordinary draw",1,px[(14*32+5)*4]>200&&px[(14*32+5)*4+1]<50);
+    EXPECT("a pixel only the ordinary draw covers is green",1,px[(14*32+1)*4+1]>200&&px[(14*32+1)*4]<50);
+    mtl_tex_release(&target);mtl_pool_del(cmd);mtl_drain();free(cmd);
+}
 int main(int argc,char **argv){@autoreleasepool{
     if(argc>1&&!strcmp(argv[1],"--access-bench"))return access_benchmark();
-    access_contract();mtl_init();dependency(0);dependency(1);
+    access_contract();mtl_init();dependency(0);dependency(1);access_tbuf();mixed();
     printf("t_geometry_hazards: %d checks, %d failed\n",checks,failed);return failed!=0;
 }}

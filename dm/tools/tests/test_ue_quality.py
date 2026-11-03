@@ -57,4 +57,12 @@ class IniEditTests(unittest.TestCase):
         self.assertEqual({r[1] for r in rows}, {'APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini'})
 
 
+class PlainKey(unittest.TestCase):
+    INI = '[/Script/Engine.Engine]\r\nbUseFixedFrameRate=True\r\nFixedFrameRate=30.000000\r\n[Other]\r\nFixedFrameRate=30.000000\r\n'
+    def test_replaced_in_its_section(self):
+        out = uq.apply(self.INI, '/Script/Engine.Engine', [('=FixedFrameRate', '60.000000')])
+        self.assertEqual(out, self.INI.replace('FixedFrameRate=30.000000', 'FixedFrameRate=60.000000', 1))
+    def test_missing_line_stops(self):
+        with self.assertRaises(uq.Error): uq.apply(self.INI, 'Other', [('=bUseFixedFrameRate', 'False')])
+
 if __name__ == '__main__': unittest.main()

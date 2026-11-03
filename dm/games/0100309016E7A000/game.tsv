@@ -1,0 +1,50 @@
+# Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles: CyberConnect2, Unreal Engine 4.25, SDK 9, NVN, IoStore; update 1.53 (v589824) with its add-ons.
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (its README.md); not tried on the iPhone
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	0100309016E7A000
+program_id	0100309016E7A000
+
+# ---- App ----
+name	Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles
+ipa	DemonSlayerKimetsuNoYaibaTheHinokamiChronicles.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v589824	1.53	main=14c878ecca9d7cb5b57e9b492b1bdb92	subsdk0=2c35246689bc9c3d21b19cebedd74646	sdk=204eaef83fe5e5617d0787c8ef01a080
+package	v589824
+shader_versions	v589824
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	APK/Content/Paks/pakchunk0-Switch.ucas
+zip_store	.pak:.png:.ttf:.ucas:.utoc:.metallib
+
+# ---- Memory ----
+# Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. An iPhone needs the allocator cut for the build and a capped region (game_args), as Octopath Traveler 0's profile (docs/reference/memory.md)
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles shaders (provisional profile)
+
+# heap check: 2026-10-27, heap 0.01 GB
+
+# address regions: 2026-10-29, in its first 15 s in nnMain the game's regions reach alias +62.06 GB, within the profile's 64.00 GB alias region (what it takes later in play is not measured here) (rewrite f2e50724db9b)
+
+# ---- Graphics ----
+# The game sets NVN's near = 0 depth mode, so the pipeline bases made before it runs (the app's offline archive) take the main0_z vertex entries.
+# Without this key they were made for near=-w and no draw found them: 1,783 bases compiled during a 75 minute session.
+depth_mode	zero
+
+# ---- Graphics quality ----
+# The application pool reported under a preset (ue_quality.tsv): Unreal's allocator budgets against it, and the Switch's 3.21 GB does not fit 4K targets (docs/agents/07-quality.md)
+ue_quality_app_pool	0x200000000
