@@ -56,7 +56,7 @@ A pak read at boot avoids all of this. It holds the game's own `.ini`, edited, a
    - Watch `[mem] alias region mapped N GB (application pool P GB)` in long sessions at each preset.
    - Set `ue_quality_app_pool` with room to spare. Demon Slayer 2 mapped 5.0 GB after 72 minutes at 4K, still growing in 0.25 GB steps, so its preset pool is 8 GB.
    - This raises only the ceiling the game may map. The footprint follows what the game uses (6.5–7.3 GB there).
-7. **Measure.** Use a fixed route (Demon Slayer 2: battle mode against the CPU) for each preset. Read the per-frame `@gpu_ms` and `@itv` from `DM_NVN_TSV`, the timing lines, and the memory lines. Repeat the Switch preset to get the run-to-run spread (±0.5 ms there).
+7. **Measure.** Use a fixed route (Demon Slayer 2: battle mode against the CPU) for each preset. Read the per-frame `@gpu_ms` and `@itv` from `DM_NVN_TSV`, the timing lines, and the memory lines. Repeat the Switch preset to get the run-to-run spread (±0.5 ms there). Near the frame budget the median `@gpu_ms` stops showing the cost (Demon Slayer 2 stayed about 14.4 ms in a fight whatever a preset added): compare the frames over budget and the p99, and aim comparison shots by frame number (`DM_NVN_SHOT`) instead of by time.
 8. **Play long sessions.** Look at the slow windows (`timing up to frame N` with a high p95) and tell their two causes apart:
    - **GPU-bound:** GPU time over the frame budget with no new pipelines. A full-screen effect at 4K reached 18–27 ms on an M4 Pro. A lower preset helps; nothing else does.
    - **First-time pipelines:** `new pipelines … ms` in `[longframe]` lines. The device archive keeps them, so they do not come back.
@@ -70,6 +70,29 @@ The settings window's Upscaling row (`DM_PRESENT_UPSCALE`) keeps its meaning. Me
 
 ## What presets cannot reach
 
-- **Texture resolution.** Most texture groups were cooked with `LODBias=1`, and the cook usually strips the mips that bias skips. Lowering `LODBias` then gains nothing; sharper textures need the files of another platform's build.
+- **A scale in the game's own code or data.** A cutscene or scene player can set `r.ScreenPercentage` itself at run time, over the device profile: read `@rt_store_mb` and the pass dumps' scene sizes in story scenes, not only in battle. Demon Slayer 2's cutscene player takes a per-object scale no ini reaches, so it took a rewriter cut ([its note](../../dm/games/0100AD80208A8000/README.md#story-scenes-at-maximum)). A preset that passes the regression route can still fail a heavy scene: survey the story too.
+- **Texture resolution, from the Switch files alone.** Most texture groups were cooked with `LODBias=1`, and the cook usually strips the mips that bias skips. Lowering `LODBias` then gains nothing by itself; sharper textures need the files of another platform's build ([PC textures](#pc-textures)).
 - **Effects with no cooked shaders.** See step 4.
 - **Engines other than Unreal.** Crash Team Racing Nitro-Fueled runs on Vicarious Visions' Alchemy engine, which has no `.ini` / console-variable system. Its resolution has to be found in its own code and raised there, as the `RENDER_SCALE` rewriter patches do for other games (`dm/games/*/patches.py`).
+
+## PC textures
+
+When the player owns the game on PC as well, the PC build can supply the texture mips the Switch cook stripped. This needs an Unreal Engine 5 game whose two builds share the IoStore/zen package layout, so that a package has the same chunk IDs (a hash of its lower-case path) and the PC chunks load in the Switch build. Demon Slayer 2 was the first; its note has the comparison and the pilot ([Graphics quality](../../dm/games/0100AD80208A8000/README.md#graphics-quality)).
+
+The mechanism:
+
+- `ue_pc_assets.tsv` in the profile chooses packages per preset: `textures` rows take the matching textures whose PC top mip has more pixels (same pixel format), `package` rows take every match (a map's `*_BuiltData` lightmaps).
+- `dm/tools/ue_pc_assets.py` indexes both builds' containers, skips a package whose container-header store entry (imports, shader map hashes) differs or, for a `textures` row, whose name map differs (some games store no shader map hashes, and a platform name such as `PhysXPC` or `PCD3D_SM5` then marks physics or shaders the Switch build cannot read), and copies the chosen packages' chunks from the PC `.ucas` block for block (Oodle blocks are not recompressed) into `<stem>_99_P.utoc` / `.ucas` with `uepak.write_toc`. The container gets the PC store entries in its header (chunk type 6, version 3) and a perfect-hash chunk table, as the game's own TOCs (version 5) have.
+- The container goes into the preset's folder beside that preset's `<stem>_99_P.pak`. Unreal mounts a `.utoc` with the pak of the same name, with the pak's patch priority, so the chosen chunks resolve to the PC ones; everything else stays the Switch's.
+- `meshes` rows take static meshes (a `BodySetup` in the name map) whose PC package is longer with the same exports: the top LODs the Switch cook stripped. Their cooked collision is named for the PC's physics format, so `rename` rows rewrite that name in the package's name map (its hash, the header sizes and offsets after it), and the mesh is taken only when the renamed name map equals the Switch's; the renamed chunk is written stored (no Oodle compressor here). On the packages whose only difference is that name, the rename gives the Switch chunk byte for byte, and the tool checks that on the first 20 it meets.
+- The preset's `ue_quality.tsv` rows set `LODBias` to 0 (`TextureLODGroups`, `LODBias=1>0`) and a larger `r.Streaming.PoolSize`, so the engine streams the extra mip.
+- The NSP script builds it only when given the PC `Content/Paks` folder (`--ue-pc-paks`, `UE_PC_PAKS`); nothing from the PC build enters the repository.
+- A package whose export chunk has the same length on both builds is skipped before its head is decoded: a stripped mip changes the mip count and the bulk data map in it. A rule of `*` then decodes only the packages that differ (Demon Slayer 2: 13 GB written in 43 s). `pack_app.py` clones the presets' folder into the app (APFS), so the container takes no second copy.
+
+Checks for a new game:
+
+1. Compare the builds first: the TOC version and flags, the container-header version, and a texture package on both sides (pixel format, `FirstMipToSerialize`, mip count). The PC Oodle blocks must decode with the game's own Oodle (`uepak.OodleHost`).
+2. Find what a route loads with `DM_FSLOG`: a file read from the RomFS image is logged as `img:<name>`, and the offsets map to the containers' blocks and chunks, and through the TOC directory index (`Toc.paths()`) to package paths.
+3. Boot with the preset and check that the game reads `<stem>_99_P.ucas` when the chosen packages load, that no `[RED]` line appears, and the memory lines (`[mem] alias region mapped`, `DM_MEMSTAT`).
+4. Compare a scene with and without the container, with the same `ue_quality.tsv` rows in both, and once with the textures only. A lightmap package changes the scene's lighting, not only its detail, so judge it on its own.
+

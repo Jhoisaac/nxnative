@@ -8,7 +8,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 |---|---|---|---|---|---|---|
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | yes |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | yes |
-| [Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2](#demon-slayer--kimetsu-no-yaiba--the-hinokami-chronicles-2) | 0 | 0 | 0 | 0 | 6 |  |
+| [Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2](#demon-slayer--kimetsu-no-yaiba--the-hinokami-chronicles-2) | 1 | 0 | 0 | 0 | 6 | yes |
 | [DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET](#dragon-ball-z-kakarot--a-new-power-awakens-set) | 0 | 0 | 0 | 0 | 3 |  |
 | [DRAGON QUEST VII Reimagined](#dragon-quest-vii-reimagined) | 1 | 1 | 0 | 0 | 3 | yes |
 | [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](#dragon-quest-xi-s-echoes-of-an-elusive-age--definitive-edition) | 0 | 0 | 0 | 0 | 2 |  |
@@ -178,16 +178,19 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 
 ### Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2
 
-[Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2](../../dm/games/0100AD80208A8000/README.md), `0100AD80208A8000`.
+[Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles 2](../../dm/games/0100AD80208A8000/README.md), `0100AD80208A8000`, [patches.py](../../dm/games/0100AD80208A8000/patches.py).
 
+**Generalize?** No: one function of the game's own cutscene player, found by disassembly of this build. The per-object scale is in the game's data and no ini reaches it.
+
+- **1.81 `main`** `68e3a0ea…` ([patches.py:8](../../dm/games/0100AD80208A8000/patches.py#L8))
+  - cut `+0x5ef2300`: AAPKDemoPlayer: ldr s8,[x19,#0xd5c] (per-object cutscene scale) → fmov s8,#1.0; the scale is then APK2.SceneCapture.ScreenPercentageMultiply alone (ue_quality.tsv: 0.9 at Maximum; the game's 0.7 elsewhere)
+  - host [hle_fpslock.c:59](../../dm/host/hle_fpslock.c#L59): engine frame limit set to fps_target: Unreal t.MaxFPS
+  - host [hle_fpslock.c:60](../../dm/host/hle_fpslock.c#L60): engine frame limit set to fps_target: Unreal rhi.SyncInterval
+  - host [hle_fpslock.c:61](../../dm/host/hle_fpslock.c#L61): engine frame limit set to fps_target: Unreal UEngine::FixedFrameRate
 - **1.02 `main`** `437c4380…`
   - host [hle_fpslock.c:53](../../dm/host/hle_fpslock.c#L53): engine frame limit set to fps_target: Unreal t.MaxFPS
   - host [hle_fpslock.c:54](../../dm/host/hle_fpslock.c#L54): engine frame limit set to fps_target: Unreal rhi.SyncInterval
   - host [hle_fpslock.c:55](../../dm/host/hle_fpslock.c#L55): engine frame limit set to fps_target: Unreal UEngine::FixedFrameRate
-- **1.81 `main`** `68e3a0ea…`
-  - host [hle_fpslock.c:59](../../dm/host/hle_fpslock.c#L59): engine frame limit set to fps_target: Unreal t.MaxFPS
-  - host [hle_fpslock.c:60](../../dm/host/hle_fpslock.c#L60): engine frame limit set to fps_target: Unreal rhi.SyncInterval
-  - host [hle_fpslock.c:61](../../dm/host/hle_fpslock.c#L61): engine frame limit set to fps_target: Unreal UEngine::FixedFrameRate
 
 ### DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET
 
