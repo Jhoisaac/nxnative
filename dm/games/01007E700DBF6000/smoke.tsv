@@ -1,0 +1,7 @@
+# A save past the story's first steps (a copy in the NSP folder, saves/menu): title, reward notice, Free Battle J1 vs CPU, All Might against Bakugo, the default stage; the CPU beats the idle player. Frame numbers, not seconds: the host shares the Mac with other jobs
+save	saves/menu
+keys	f2700:A~0.3,f3800:A~0.3,f4000:Down~0.2,f4060:Down~0.2,f4120:A~0.3,f4800:A~0.3,f5100:Down~0.2,f5160:Down~0.2,f5220:Down~0.2,f5280:Down~0.2,f5340:A~0.3,f5500:Right~0.2,f5560:A~0.3,f5680:Right~0.2,f5740:A~0.3,f5860:A~0.3,f5980:Right~0.2,f6040:A~0.3,f6160:Right~0.2,f6220:A~0.3,f6340:A~0.3,f6580:A~0.3
+secs	260
+quick	180
+reach	9000@230
+window	200	50
