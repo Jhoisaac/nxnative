@@ -70,6 +70,7 @@ The settings window's Upscaling row (`DM_PRESENT_UPSCALE`) keeps its meaning. Me
 
 ## What presets cannot reach
 
+- **A scale in the game's own code or data.** A cutscene or scene player can set `r.ScreenPercentage` itself at run time, over the device profile: read `@rt_store_mb` and the pass dumps' scene sizes in story scenes, not only in battle. Demon Slayer 2's cutscene player takes a per-object scale no ini reaches, so it took a rewriter cut ([its note](../../dm/games/0100AD80208A8000/README.md#story-scenes-at-maximum)). A preset that passes the regression route can still fail a heavy scene: survey the story too.
 - **Texture resolution, from the Switch files alone.** Most texture groups were cooked with `LODBias=1`, and the cook usually strips the mips that bias skips. Lowering `LODBias` then gains nothing by itself; sharper textures need the files of another platform's build ([PC textures](#pc-textures)).
 - **Effects with no cooked shaders.** See step 4.
 - **Engines other than Unreal.** Crash Team Racing Nitro-Fueled runs on Vicarious Visions' Alchemy engine, which has no `.ini` / console-variable system. Its resolution has to be found in its own code and raised there, as the `RENDER_SCALE` rewriter patches do for other games (`dm/games/*/patches.py`).

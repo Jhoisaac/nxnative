@@ -33,7 +33,7 @@ The profile's `ue_quality.tsv` gives the settings window's **Graphics quality** 
 | Switch | 1600x900 (the game's) | 256 (the game's) | game's |
 | High | 1920x1080 | 1024 | game's |
 | Very high | 2560x1440 | 2048 | 0 |
-| Maximum | 3840x2160 | 2048 | 0 |
+| Maximum | 3840x2160 | 2048 | 1 (the game's default half-resolution pass, see [Story scenes](#story-scenes-at-maximum)) |
 
 All three also set, in `SwitchConsole DeviceProfile`: `r.Shadow.MaxCSMResolution` 2048, `r.Shadow.DistanceScale` 1.0, `r.Shadow.CSM.MaxCascades` 3, `r.MaxAnisotropy` 8, `r.StaticMeshLODDistanceScale` 1.0, `r.SkeletalMeshLODRadiusScale` 1.0, `grass.CullDistanceScale` 1.0, `r.AmbientOcclusionRadiusScale` 0.8, `r.LightMaxDrawDistanceScale` 1.0, `r.Streaming.PoolSize` 1200; and in `Switch DeviceProfile` the texture groups filtered `linear` become `aniso` and mip filter `point` becomes `linear` (the point-filtered data groups stay). Handheld keeps the Switch values (only SwitchConsole changes resolution).
 
@@ -42,7 +42,7 @@ Maximum also raises what the Switch's device profiles lower (`BaseSwitchDevicePr
 | Set | GPU p50 / p99 (ms) | Over 16.6 ms (of 4,501) | Seen in the frame 9000 shot |
 |---|---|---|---|
 | Maximum before (3 runs) | 13.5-14.4 / 15.2-15.8 | 11-14 | |
-| The rows above (kept) | 13.88 / 15.97 | 14 | Fuller foliage (a nearer LOD), stronger ambient occlusion, a 64x64 lighting volume |
+| The rows above (kept, except half-resolution ambient occlusion: [Story scenes](#story-scenes-at-maximum)) | 13.88 / 15.97 | 14 | Fuller foliage (a nearer LOD), stronger ambient occlusion, a 64x64 lighting volume |
 | Shadows only: `r.Shadow.MaxResolution` and `MaxCSMResolution` 4096, `r.ShadowQuality` 5, `r.Shadow.RadiusThreshold` 0.01, 4 cascades, `r.ChangeSkeletalMeshShadowLODBias` 0 (left out) | 13.63 / 16.39 | 28 | The fight's shadow targets stay 2048x512 at that frame |
 | `r.DetailMode` 2, Niagara quality 3, `r.EmitterSpawnRateScale` 1, `r.ParticleLightQuality` 2 (left out) | 13.65 / 15.40 | 14 | No difference outside the characters (mean 0.13-0.21 of 255, against 2.4 for the post-processing rows); frames with effects were not comparable |
 | Every row together (left out) | 14.36 / 17.41 | 90 | |
@@ -69,6 +69,48 @@ PC textures, full set (2026-11-01, Maximum preset, current): after the player pa
 
 PC textures pilot (2026-11-01, Maximum preset; passed on the player's TV): `ue_pc_assets.tsv` takes the tutorial fight's stage textures (`Art/Env/a/015`), Tanjiro's default model (`Model/Plc/P0001/V00/C00`), the fight's demon (`Model/Emy/E0007`) and the stage's lightmap (`a015_Light_BuiltData`); `ue_pc_assets.py` chose 127 textures (35 of them 512 → 1024, 16 of them 1024 → 2048; skipped 42 not larger, 4 with other imports, 459 non-textures) and the lightmap, 218 MB in `pakchunk0-Switch_99_P.ucas` (37 MB without the lightmap). The Maximum rows now also set `LODBias` 0 (`1>0`, `2>0`) and `r.Streaming.PoolSize` 3000. On the regression route (`smoke.tsv`, headless, host with `DM_FSLOG` naming RomFS files) the game mounts the container with the preset's pak, reads it when the stage loads (110 s, 834 reads), and plays to the fight with no `[RED]` line; the registered 2D textures at 200 s hold 798 Mpixels against 756 without the container (more 1024 and 2048 textures). Same `ue_quality.tsv`, no container / textures only / textures and lightmap: GPU p50 14.50 / 14.52 / 14.54 ms in the fight, physical footprint max 5.65 / 5.84 / 6.10 GB, Metal allocation max 3.71 / 3.62 / 4.00 GB. The PC lightmap changes the lighting, not only its detail: the forest floor is brighter and bluer than with the Switch lightmap (the PC data also carries low-quality lightmap copies the Switch cook left out); whether that matches the PC game is for the player to judge. Not checked: a close-up comparison of the same frame (the timed shots catch the fight at different moments), the remaining ~9,000 textures and the other lightmaps (+7.8 GB), long sessions.
 
+## Story scenes at Maximum
+
+Current, 2026-11-02 (M4 Pro, headless, a copy of the player's save, 1.81, the PC assets, one fresh boot per node). Two changes came from this survey.
+
+**The tatami room (ambient occlusion).** The full-resolution ambient occlusion in the rows above cost chapter 1 node 0's tatami room 2,501 of 10,510 frames over 16.6 ms in the run kept here (84 of 11,012 with the previous preset; one pass, an R8 target with 2 draws, 5.59 ms against 1.39). `r.AmbientOcclusionMaxQuality` 75 or 50, `r.AmbientOcclusionLevels` 1 or 2, `r.LightShaftQuality` 0, radius 0.8, `r.AmbientOcclusionMipLevelFactor` 0.5, a half-resolution diffusion filter and `r.ViewDistanceScale` 1 did not fix it. `r.AmbientOcclusion.HalfResolution` 1, keeping `r.AmbientOcclusionMaxQuality` 100, did: 75 of 10,449 frames over budget, and the frame at F21500 differs from the full-resolution one by a mean of 1.41 of 255 (the previous preset by 5.34, flatter).
+
+**Cutscene resolution (a deliberate cut of the game's code).** `AAPKDemoPlayer` (`patches.py`) scales `r.ScreenPercentage` to its per-object scale times `APK2.SceneCapture.ScreenPercentageMultiply` in docked mode: 56% (2152x1212) at Maximum in the one stretch measured. The cut leaves only the cvar, and Maximum sets it to 0.9 (3456x1944). Chapter 3's route: 100% gave 681 of 14,501 frames over 16.6 ms and p99 17.95 ms; 90% gave 83 and 15.32 (32 and 15.48 at 56%). Every other preset, which has no row for the cvar, gets the game's 0.7 instead of 0.56; not measured.
+
+This stretch is the only one found: in the 19 nodes below the scene stays 3840 wide outside it. The sampling is one pass dump per 900 frames, so a stretch under 15 seconds would not show. Shadow cvars gave no visible gain in the same scenes: `r.Shadow.MaxResolution` 4096 changed nothing, `r.Shadow.TexelsPerPixel` 2.546 doubled the fight's shadow viewport (1032x983 to 2048x1887) with p99 16.15 against 15.83 ms and was left out; the fight was not compared by eye, and shadow targets appear in few frames of the cutscenes.
+
+Input: `DM_KEYS` route, then a bot on `DM_CTL` (ZR, walk, attacks, confirm) from the chapter's menu. Frames before 11250 (boot, menus), screenshot frames and pass dump frames are left out. The longest frame is usually the load that opens the node. No run crashed, and no `[RED]` line came from the game (the only ones: `DM_KEYS step lacks 'seconds:'`, the route overflowing that switch's 4,096-byte buffer).
+
+| Node | Reached | Frames | Scene width | fps | GPU p50 / p99 ms | GPU > 16.6 ms | Frame p99 ms | Longest frame ms | Frames > 25 ms | Peak footprint GB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Chapter 1 node 0 | Opening cutscene, title card, tatami room; stops at exploration | 11250-30092 | 3840 | 59.5 | 14.2 / 15.2 | 82/18770 | 20.2 | 326 | 109 | 6.75 |
+| Chapter 1 node 1 | Cutscene; stops at exploration | 11250-30088 | 3840 | 59.6 | 14.3 / 15.2 | 68/18766 | 19.6 | 255 | 80 | 6.53 |
+| Chapter 1 node 2 | Cutscene; stops at exploration | 11250-30123 | 3840 | 59.6 | 14.7 / 15.1 | 24/18805 | 18.4 | 298 | 40 | 7.17 |
+| Chapter 1 node 3 | Cutscene; stops at exploration | 11250-30064 | 3840 | 59.6 | 14.2 / 15.5 | 31/18744 | 17.8 | 267 | 34 | 7.34 |
+| Chapter 1 node 4 | Cutscenes and dialogue, then exploration | 11250-48219 | 3840 | 59.5 | 15.9 / 16.3 | 175/36829 | 17.8 | 290 | 126 | 7.35 |
+| Chapter 1 node 5 | Cutscene; stops at exploration | 11250-30126 | 3840 | 59.7 | 15.0 / 15.5 | 13/18804 | 17.5 | 302 | 27 | 6.78 |
+| Chapter 1 node 6 | Cutscene, shamisen minigame; stops at exploration | 11250-30175 | 3840 | 59.7 | 14.7 / 16.1 | 23/18853 | 17.4 | 276 | 41 | 5.87 |
+| Chapter 2 node 0 | Cutscene; stops at exploration | 11250-30053 | 3840 | 59.6 | 14.8 / 15.1 | 34/18733 | 18.0 | 326 | 42 | 7.80 |
+| Chapter 2 node 1 | Cutscene; stops at exploration | 11250-30059 | 3840 | 59.6 | 14.8 / 15.0 | 17/18737 | 18.0 | 304 | 27 | 7.69 |
+| Chapter 2 node 2 | Cutscene, fight; not won | 11250-48132 | 3840 | 59.7 | 14.2 / 15.9 | 93/36740 | 19.6 | 385 | 37 | 8.04 |
+| Chapter 2 node 3 | Cutscene; stops at exploration | 11250-30246 | 3840 | 59.1 | 14.6 / 15.4 | 116/18924 | 18.4 | 360 | 133 | 8.27 |
+| Chapter 2 node 4 | Cutscene, fight; left by the bot through the pause menu, then a memory fragment | 11250-48182 | 3840 | 59.7 | 13.9 / 15.5 | 107/36790 | 19.1 | 334 | 35 | 5.98 |
+| Chapter 2 node 5 | Cutscene, fight; left by the bot through the pause menu | 11250-48019 | 3840 | 59.5 | 14.2 / 15.9 | 161/36629 | 19.1 | 307 | 161 | 8.72 |
+| Chapter 3 node 0 | Cutscene, fight; not won | 11250-48148 | 3840 | 59.8 | 14.4 / 17.1 | 739/36756 | 20.0 | 369 | 31 | 7.15 |
+| Chapter 3 node 1 | Cutscene; stops at exploration | 11250-30165 | 3840 | 59.7 | 14.5 / 15.1 | 23/18843 | 17.7 | 372 | 41 | 7.05 |
+| Chapter 3 node 2 | Cutscenes, fight; not won | 11250-48054 | 3840 | 59.7 | 14.5 / 16.5 | 245/36664 | 18.2 | 403 | 93 | 8.89 |
+| Chapter 3 node 3 | Cutscene at 90% (the one stretch the cut reaches), then the Daki fight; not won | 11250-17550 | 3840 | 59.2 | 14.2 / 15.2 | 22/6278 | 19.9 | 276 | 38 | 8.85 |
+| Chapter 3 node 3 | Cutscene at 90% (the one stretch the cut reaches), then the Daki fight; not won | 17550-33750 | 3456 | 59.8 | 14.2 / 15.4 | 85/16139 | 18.5 | 138 | 23 | 8.85 |
+| Chapter 3 node 3 | Cutscene at 90% (the one stretch the cut reaches), then the Daki fight; not won | 33750-48003 | 3840 | 59.9 | 13.8 / 15.9 | 53/14196 | 19.3 | 26 | 4 | 8.85 |
+| Chapter 3 node 4 | Ending scenes, Upper Moons | 11250-48156 | 3840 | 59.7 | 14.0 / 15.3 | 33/36764 | 18.8 | 386 | 42 | 7.15 |
+| Interlude 1 node 0 | Dialogue, then exploration | 11250-48164 | 3840 | 59.8 | 14.5 / 15.5 | 18/36770 | 17.6 | 309 | 22 | 8.30 |
+
+Not reached (open): the player's save has the later chapters and chapter 2's last node locked, and the bot does not get through exploration, so the scenes after each "stops at exploration" and after each fight were not run (no fight was won: the bot's attacks barely hurt the bosses, and its Up+A, meant for the continue prompt, can pick "back to chapter select"). The game holds 395 master sequences (107 story and boss, 252 special techniques, 36 DLC). The nodes above were not mapped to sequence names, and special techniques were not seen firing in the one try (chapter 2 node 2, sampled every 120 frames, no scene size change). These all get the preset and the cut, but their cost is not measured.
+
+The official app packed with these changes (NSP script, 32.9 GB; its rewritten main and its container byte-identical to the ones measured above), chapter 3 node 3 with the bot: no `[RED]` line, no crash, 30,243 frames; at 3840 59.3 fps, GPU 13.2 / 15.2 ms, 24/7186 frames over 16.6 ms, frame p99 21.2 ms, longest frame 265 ms; at 3456 59.9 fps, 13.5 / 15.2 ms, 13/11751, 19.1 ms, 58 ms; peak footprint 8.58 GB.
+
+`regress.py check --games 0100AD80208A8000` against 34ea1b662474 (its route runs at the Switch preset, where the cut gives 70% in place of 56%; the `ue_quality.tsv` rows do not apply): shaders 128462/128462 unchanged, boot ok, fps 59.8 → 59.8, frame p99 17.5 → 17.43 ms, peak 5067 → 5102 MB, no new red line. The tool reports REGRESSION for the screenshots at 190 and 215 s (dHash 17 and 16 bits, RGB 10.44 and 10.24): both pairs show the same tutorial fight with the camera and the characters elsewhere and no rendering difference by eye, and two baseline runs of the same commit differ by more (dHash 25 and 27 bits, RGB 11.27 and 10.58), which the tool cannot know from its one baseline run per check. Whether the route's cutscene crosses the cut's code was not checked.
+
 ## Files and shaders
 
 - No shader code archive and no IoStore shader library: eleven `pakchunk*-Switch.utoc` / `.ucas` containers (11 GB) beside version 11 paks, every shader inline in the cooked packages and the engine's in `Engine/GlobalShaderCache-SP_GLSL_SWITCH.bin` of `pakchunk0-Switch.pak`. They are decoded by the game's own Oodle in the Mac host's tool mode (`uepak.py` `ue5_inline_shaders` / `inline_archives`, the lazy `Lazy` decoder in step 5 of the NSP script): global 2,854 (1,480 pixel, 1,287 compute, 85 vertex, 2 geometry), packages 113,444 (90,610 pixel, 14,277 vertex, 8,555 compute, 2 geometry); 113,089 unique keys; the maps' pairs are in `pso_pairs.tsv` (below) ([Unreal Engine 5 shaders inline in IoStore cooked packages](../../../docs/reference/shaders.md#unreal-engine-5-shaders-inline-in-iostore-cooked-packages-oodle)).
@@ -90,6 +132,7 @@ General changes first needed here; each applies to every game:
 - **The depth mode for the bases made before the game runs** (`depth_mode zero` in `game.tsv`, current): the game sets near = 0, and the NSP script's prebuild and the app's offline archive were made for near = −w, so no draw found them and the host built every base again (the app log said `the game's depth mode is not the one built for`). With the key the app's archive is stamped `depth near=0`.
 - **metal-tt's stack on a large archive** (`pso_offline.py` `big_stack`): with the pairs decoded from its Unreal shader maps (108,611 bases) the offline archive build overflowed `air-nt`'s 8 MB main thread stack after 36 minutes; `metal-tt` now runs with the hard limit, 64 MB ([metal-tt's backend overflows its stack on a large archive](../../../docs/reference/shaders.md#metal-tts-backend-overflows-its-stack-on-a-large-archive)).
 - **Pipeline archive files mapped** (`nvn_mtl.m` `arch_open`, unit test `t_pso_archive`): Metal read every archive file into memory it kept, 5.8 GB of this game's footprint ([Pipeline archive files read into memory](../../../docs/reference/memory.md#pipeline-archive-files-read-into-memory)).
+- **Cutscene resolution cut** (`patches.py`, current): a deliberate change of the game's code; [Story scenes](#story-scenes-at-maximum).
 - **Graphics quality presets** (`ue_quality.tsv`, `dm/tools/ue_quality.py`, `hle_fs.c` `DM_UE_QUALITY`, current): replacement paks of the device-profile ini, chosen in the settings window ([Graphics quality](#graphics-quality)).
 - **Another platform's textures** (`ue_pc_assets.tsv`, `dm/tools/ue_pc_assets.py`, `uepak.write_toc`, current, pilot): an IoStore patch container with the PC build's chunks of chosen packages, mounted with the Maximum preset's pak ([PC textures](../../../docs/agents/07-quality.md#pc-textures)).
 - **A second patch area for a text beyond 128 MB** (`patch_nso.py` `SPLIT_MODE`, `loader.c`, current): update 1.81's `main` has 128.4 MB of text, out of reach of any one area before the base ([A second patch area after the key page](../../../docs/reference/rewriter.md#a-second-patch-area-after-the-key-page-for-a-text-beyond-128-mb)).

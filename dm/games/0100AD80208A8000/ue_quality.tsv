@@ -34,7 +34,8 @@ veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole Dev
 veryhigh	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	MinMagFilter=linear>aniso,MipFilter=point>linear
 max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.setres	3840x2160
 max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.MaxResolution	2048
-max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.AmbientOcclusion.HalfResolution	0
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.AmbientOcclusion.HalfResolution	1
+max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	APK2.SceneCapture.ScreenPercentageMultiply	0.9
 max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.MaxCSMResolution	2048
 max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.DistanceScale	1.0
 max	APK2/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.CSM.MaxCascades	3
