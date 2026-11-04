@@ -1,0 +1,13 @@
+# The autosave at the start of Piccolo's canyon flight (a copy in the NSP folder, saves/canyon). Frame numbers: regress.py runs the game at its own 30 fps (the game profile's fps_target; no launcher settings), its first frame
+# comes about 64 s after launch (the pipeline archive is prebuilt first), so frame f is at about 64 + f/30 s. Presses, from a run with these keys (shots every 15 s, 70 to 385 s): the title (Dragon Ball Z logo, then
+# "Revisando contenido descargable" at 130 s) takes A at frames 1,500 and 1,900, the menu A at 2,300 (Continuar) and 2,700 (the autosave, "Cargar": "Confirmas que quieres cargar estos datos guardados?" with No
+# highlighted at 160 s), Up at 3,100 selects Si and A at 3,500 loads it ("Guardando" at 190 s). A at 3,900 and 4,300 dismiss the first tutorial bubble (205 s). Piccolo then stands on the canyon edge facing the bridge, with the
+# HUD, the minimap and the scrolling ticker from about 215 s (frame about 4,500); the shots stay on that picture. Checked on regress.py runs (see dm/games/010051C0134F8000/README.md)
+save	saves/canyon
+keys	f1500:A~0.4,f1900:A~0.4,f2300:A~0.4,f2700:A~0.4,f3100:Up~0.4,f3500:A~0.4,f3900:A~0.4,f4300:A~0.4
+secs	330
+quick	90
+reach	7000@330
+window	240	70
+shots	250,300
+hang	30

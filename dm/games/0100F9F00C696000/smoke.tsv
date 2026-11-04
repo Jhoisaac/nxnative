@@ -1,0 +1,12 @@
+# The user's own save (a copy of ~/Library/Application Support/nxnative/0100F9F00C696000/save in the NSP folder, saves/arcade) is past the language select and the licence pages,
+# and the earlier headless race route (controls_scripts/route2.sh, from a save that is gone) pressed, in seconds from launch: A 28, A 32, Down 36, A 37, A 42, A 47, Y 52, Y 58 (Local Arcade, Single Race) and the race
+# was up at about 98 s. Converted at 60 fps from the first frame at about 8 s (route2 waits for log frame 2,980 right after the last Y). B (accelerate) at frame 5,700 drives 20 s. Shots at 96 and 100 s are
+# meant for the kart standing on the grid before B. Checked by regress.py on 2026-11-04 (report 20261104-140317-check): reach met in both runs, the 100 s shot shows Crash on the grid of Tubos de Roo
+save	saves/arcade
+keys	f1200:A~0.3,f1440:A~0.3,f1680:Down~0.3,f1740:A~0.3,f2040:A~0.3,f2340:A~0.3,f2640:Y~0.3,f3000:Y~0.3,f5700:B~20
+secs	140
+quick	90
+reach	6600@130
+window	105	25
+shots	96,100
+hang	30
