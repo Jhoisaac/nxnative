@@ -12,7 +12,7 @@ A record of the picture quality this game reaches on each Apple chip at 60 fps, 
 
 The window is the forest walk: frames 8800-12800, 3,988 frames with screenshot frames left out. The east canyon windows are described under [The east canyon](#the-east-canyon).
 
-PC textures are a separate change; rows below that include the PC pilot say so.
+Rows that include the PC textures say whether the pilot (493 textures) or the [full set](#pc-textures-full-set) (9,670).
 
 ## Applied at Maximum
 
@@ -43,8 +43,8 @@ Peak footprint 4.69 GB, alias region 4.50 GB mapped, no `[RED]` line, no crash.
 | 90% + LOD + post-processing | 59.8 | 2.83% | 15.47 / 16.77 | `s3_LP` |
 | 90% + all | 59.4 | 25.88% | 15.97 / 17.53 | `s3_G` |
 | 85% + all | 59.8 | 0.03% | 14.81 / 16.29 | `s3_G85` |
-| 85% + all + PC pilot (a separate change), `LODBias` 0 | 59.7 | 8.10% | 15.26 / 16.88 | `s4_rel` |
-| 80% + all + PC pilot (a separate change), `LODBias` 0 | 59.8 | 0.00% | 14.66 / 15.54 | `s5_rel80` |
+| 85% + all + PC pilot, `LODBias` 0 | 59.7 | 8.10% | 15.26 / 16.88 | `s4_rel` |
+| 80% + all + PC pilot, `LODBias` 0 | 59.8 | 0.00% | 14.66 / 15.54 | `s5_rel80` |
 
 A walk in Goku's house and the cooking menu at 85% with the PC pilot: 60 fps, 0.02% over budget, GPU p99 15.08 ms (`st1`).
 
@@ -54,7 +54,8 @@ A walk in Goku's house and the cooking menu at 85% with the PC pilot: 60 fps, 0.
 |---|---|---|
 | Native 4K scene | Power | 36.48% over budget before anything else |
 | PC movies | MPEG-2 (CRI Prime): the Switch's player shows black; re-encoding not tried | |
-| PC textures | A separate change | |
+| PC meshes | NPC, enemy and vehicle meshes are 1.4-1.5x larger on the PC, but its cook is UE 4.21 against the Switch's 4.24; a converter would be needed | Not attempted |
+| PC lightmaps | 413 maps have no baked lighting on the Switch, 54 another bake | 8 compatible ones are in the set |
 
 ## The player's session
 
@@ -104,6 +105,31 @@ Flying costs about 0.6-1.2 ms more than standing (from the player's log), which 
 
 **Route.** A headless route to the canyon from a save at the flight start is `q/keys_canyon.txt` in the work folder; take-off with the left stick up.
 
+## PC textures, full set
+
+Measured 2026-11-03 on the M4 Pro, headless, Maximum with the full set ([the rule](README.md#pc-textures)). Window: frames 13500-15500 at the canyon at the flight start.
+
+| Scene percentage | Textures | fps | GPU p50 / p99 | Over 16.6 ms |
+|---|---|---|---|---|
+| 80% | Pilot | 59.2 | 16.69 / 17.44 | 73.4% |
+| 80% | Full | 52.7 | 18.82 / 19.44 | 100% |
+| 75% | Full | 58.1 | 17.05 / 17.83 | 95.4% |
+| 70% | Full | 59.4 | 15.34 / 16.07 | 0.45% |
+| 70% | Pilot | 59.7 | 13.39 / 15.17 | 0.00% |
+
+The full set costs about 2 ms of GPU at the canyon (draws equal; inferred: the bandwidth of the bigger mips). The forest walk:
+
+| Scene percentage | Textures | fps | GPU p50 / p99 | Over 16.6 ms |
+|---|---|---|---|---|
+| 80% | Full | 59.6 | 14.71 / 15.77 | 0.05% |
+| 75% | Full | 59.7 | 13.85 / 16.61 | 1.08% |
+| 70% | Full | 59.7 | 13.11 / 15.08 | 0.02% |
+| 80% | Pilot (baseline) | 59.8 | 14.66 / 15.55 | 0% |
+
+Flight at 70% with the full set: take-off 56.3 fps (p50 15.92 ms, 12.8% over); flying 58.8 fps (p50 16.13 ms, 23.2% over); then an aerial fight against a robot at 56.5-59.8 fps. Memory: about +250 MiB footprint, +300-400 MB resident and GPU allocated; the app pool of 8 GB not approached, `r.Streaming.PoolSize` 3000 not exceeded. Eight runs, 0 `[RED]`, no crash, no black or corrupt texture. The player chose 70% with the full set.
+
+The player's session with the full set (2026-11-04, the Latino app, 70%, about 4.8 minutes from the canyon save: 17,100 frames): 0 `[RED]`, 0 audio underruns, exit 0. The flight and the aerial fight hold 59.8 fps in almost every window of 300 frames (GPU p50 12.4-15.4 ms); the player saw a steady 60 and the flying dinosaur moving smoothly. The robot's entrance (frames 9,720-10,009) holds 41-55 fps: frames of 387, 705 and 713 ms with no new pipeline and GPU under 10 ms (a game-side stall, inferred: loading), and one of 220 ms with 2 pipelines and 80 MB of texture uploads. 32 bases compiled in play, about 30-250 ms per window where they fall. Approved by the player.
+
 ## Not checked
 
-Fights and towns as a measured route, real-time cutscenes' scene size, the High and Very high presets, handheld. The 70% set with every raised row was measured at the canyon standing, not yet on the forest walk or in a fight; the player's flight at 70% is not measured.
+Fights and towns as a measured route, real-time cutscenes' scene size, the High and Very high presets, handheld. A dinosaur stretch measured (the player saw it smooth), the robot entrance's stall on the Switch, My Hero One's Justice 2 in game with the new rule, iOS.

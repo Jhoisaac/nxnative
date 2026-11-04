@@ -1,0 +1,4 @@
+# The PC build's texture mips for a preset, from the player's own copy (dm/tools/ue_pc_paks.py, the NSP script's --ue-pc-paks): each Switch mip is the PC mip of its size, swizzled, byte for byte; the Switch cook stripped the top ones (LODBias 2 and 1) and stored some textures smaller or with no chain, so the PC's chain is added around the stored levels.
+# Columns, separated by tabs: preset, textures, pattern (fnmatch on the package path without the extension, case-insensitive).
+# The full set: every package under AT/Content (the tool takes the textures whose chain is the PC's). The earlier pilot (Area03, the shared trees, the playable characters) was 493 textures.
+max	textures	AT/Content/*

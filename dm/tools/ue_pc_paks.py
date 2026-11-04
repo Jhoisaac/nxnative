@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # Another platform's top texture mips for a game whose assets live in a legacy pak (no IoStore; UE 4.21 and the like): ue_pc_paks.py <game id> <RomFS root of the extracted game> <other platform's Paks dir> <out dir>
 # ue_pc_assets.py hands its packages to a game that shares the other platform's IoStore layout. A pak game cannot take them: these Switch cooks store every streamed mip block-linear, the PC's are linear, and the packages
-# differ. What can be shared is the texel data: checked on My Hero One's Justice 2, each Switch level is the PC level of the same size, swizzled, byte for byte. So this tool keeps the Switch package and adds the mip the cook
-# stripped (FirstMip 1 there, 0 on the PC): the PC's top level swizzled into the Switch's layout, the mip entry in the .uexp, the bulk offsets, SkipOffset, the export's SerialSize and the package's BulkDataStartOffset.
-# A texture is taken only when its other level, swizzled by the same rule, equals the Switch's own (so a wrong rule or a different encode cannot reach the game), when its pixel format and size are the same and it is a single 2D surface.
+# differ. What can be shared is the texel data: checked on My Hero One's Justice 2 and DRAGON BALL Z: KAKAROT, each Switch level is the PC level of the same size, swizzled, byte for byte. So this tool keeps the Switch package and
+# gives each texture the PC's whole chain: the levels the cook stripped on top (FirstMip 1 there, 0 on the PC; or a texture stored smaller, e.g. 512 against the PC's 2048) and the levels it never stored at the tail (one mip, no chain),
+# all the PC's levels swizzled into the Switch's layout, with the PC's size, first mip and level count, the mip entries in the .uexp, the bulk offsets, SkipOffset, the export's SerialSize and the package's BulkDataStartOffset.
+# A texture is extended only when every level the Switch stores, swizzled by the same rule, equals the Switch's own (so a wrong rule cannot reach the game), when those levels are consecutive levels of the PC's chain of the same
+# sizes, when its pixel format is the same and it is a single 2D surface. When the first stored level equals the PC's but a later one does not (the same image encoded again), the PC's whole chain replaces the Switch's (every
+# PC level, swizzled, with the PC's size, first mip and level count), so no texture mixes the builds' levels; it is counted apart in the report (`full chain`), as ue_pc_zen4.py does. When the first stored level differs, the
+# Switch's texture stays (`level`). Every rebuilt texture is read back and each level compared with the swizzled PC level.
 # Rows of the profile's ue_pc_assets.tsv: preset <TAB> textures <TAB> pattern (fnmatch on the package path without the extension, case-insensitive). The result joins ue_quality.py's pak, <out dir>/<preset>/<dir>/<stem>_99_P.pak,
 # and is Zlib-compressed in 64 KB blocks. Materials, maps and meshes are not taken: materials hold D3D shaders. The PC pak's key is found in the PC build's executable (never printed or written).
 import fnmatch, multiprocessing, os, re, shutil, struct, subprocess, sys, tempfile, zlib, ctypes
@@ -100,15 +104,33 @@ def exports(ua):
     if n <= 0 or (dep - eo) % n or dep <= eo: raise ValueError('no export table')
     return eo, (dep - eo) // n, n
 
+def name_offset(ua):   # the summary's NameOffset, where the name table and so the end of the summary is (see exports for the walk)
+    o = 20; ncv = struct.unpack_from('<i', ua, o)[0]; o += 4 + 20 * max(ncv, 0)
+    o += 4
+    fl = struct.unpack_from('<i', ua, o)[0]; o += 4 + fl
+    return struct.unpack_from('<i', ua, o + 8)[0]   # after PackageFlags and NameCount
+
+def chain(x, y):
+    """(j, n) of a Switch texture x inside the other build's y: n stored levels, the first of them is y's level j and each following one y's next (same size); or None. The levels y has before j are added on top, those after j + n at the tail"""
+    n = len(x['mips'])
+    sz = [(m['w'], m['h']) for m in y['mips']]
+    if not n or (x['mips'][0]['w'], x['mips'][0]['h']) not in sz: return None
+    j = sz.index((x['mips'][0]['w'], x['mips'][0]['h']))
+    if j + n > len(sz) or any(sz[j + i] != (m['w'], m['h']) for i, m in enumerate(x['mips'])): return None
+    return j, n
+
 def missing_mips(ue, pue):
-    """[(Switch texture, other build's)] of the .uexp pairs whose textures lack the other's top mips, and None; or None and the reason a package is not taken"""
+    """[(Switch texture, other build's)] of the .uexp pairs whose textures lack levels of the other's chain (on top, as the cook stripped them or stored a smaller texture, or at the tail, no chain), and None; or None and the reason a package is not taken.
+    The Switch's stored levels must be levels of the other's chain, the first one wherever it falls, each next one the next level of the same size"""
     a, p = blobs(ue), blobs(pue)
     if not a or len(a) != len(p): return None, 'format'
     out = []
     for x, y in zip(a, p):
-        if x['pf'] != y['pf'] or x['pf'] not in FORMATS or (x['w'], x['h']) != (y['w'], y['h']) or x['packed'] & 0xffff != 1 or y['packed'] & 0xffff != 1: return None, 'format'
-        if x['first'] == y['first'] and x['num'] == y['num']: continue   # complete on both
-        if x['first'] <= y['first'] or y['num'] != x['num'] + x['first'] - y['first']: return None, 'format'
+        if x['pf'] != y['pf'] or x['pf'] not in FORMATS or x['packed'] & 0xffff != 1 or y['packed'] & 0xffff != 1 : return None, 'format'
+        c = chain(x, y)
+        if not c: return None, 'format'
+        j, n = c
+        if j == 0 and j + n == len(y['mips']) and (x['w'], x['h'], x['first']) == (y['w'], y['h'], y['first']): continue   # complete on both
         out.append((x, y))
     return (out, None) if out else (None, 'same')
 
@@ -117,39 +139,61 @@ def level_data(mip, uexp, ubulk, start):   # a mip's bytes: inline in the .uexp,
     d = ubulk[mip['off'] + start:mip['off'] + start + mip['disk']]
     return d if len(d) == mip['disk'] else None
 
-def rebuild(ua, ue, ub, pue, pub, pstart, pairs):
-    """The package's files with the pairs' top mips added: ((uasset, uexp, ubulk), None), or (None, reason). A mip's bulk offset is its place in the .ubulk minus BulkDataStartOffset, which is where the package's data ends before its
-    4-byte tag; SkipOffset and an inline mip's offset are positions in the package (.uasset + .uexp), so everything after an added mip moves"""
-    added = sum(36 + (t['disk'] if t['data'] is not None else 0) for x, y in pairs for t in y['mips'][:x['first'] - y['first']])
+def rebuild(ua, ue, ub, pue, pub, pstart, pairs, full=None):
+    """The package's files with the pairs' missing levels added: ((uasset, uexp, ubulk), None), or (None, reason). A texture takes the other's size, first mip and level count; its stored levels stay as they are between the levels
+    added on top and at the tail, all swizzled from the other's. A mip's bulk offset is its place in the .ubulk minus BulkDataStartOffset, which is where the package's data ends before its 4-byte tag; SkipOffset and an inline
+    mip's offset are positions in the package (.uasset + .uexp), so everything after an added mip moves. A texture whose first stored level is the other's but a later one is not (another encode of the same image) takes the
+    other's whole chain instead, none of its own levels; its index in the .uexp is appended to full when given. The result is read back and compared with the other's chain before it is returned"""
     lo, s0 = len(ua), len(ua) + len(ue) - 4
-    s1 = s0 + added
     top_of = {x['skip']: y for x, y in pairs}
-    ex, bulk, pos, marks = bytearray(), bytearray(), 0, []   # marks: (old .uexp position, how far what follows moved)
-    for x in blobs(ue):
+    bs = blobs(ue); plan = {}   # plan: the texture's index -> (the other's texture, j, n, the bytes of each level of the other's chain)
+    added = 0; isfull = set()
+    for xi, x in enumerate(bs):
         y = top_of.get(x['skip'])
+        if not y: continue
+        j, n = chain(x, y); ny = len(y['mips']); bpb, bw = FORMATS[x['pf']]
+        have = [level_data(m, ue, ub, s0) for m in x['mips']]; other = [level_data(m, pue, pub, pstart) for m in y['mips']]
+        if None in have or None in other: return None, 'size'
+        whole = None   # the layout of the first rule that makes the first stored level the other's while a later one differs
+        for sparse in (True, False):   # one rule for the texture: the first that holds for every stored level
+            lay = layout(y['w'], y['h'], bpb, bw, y['first'] + ny, sparse)
+            try:
+                f = lambda i, h: len(h) == lay[y['first'] + j + i][4] and swizzle(other[j + i], lay[y['first'] + j + i]) == h
+                if all(f(i, h) for i, h in enumerate(have)): whole = None; break
+                if whole is None and f(0, have[0]): whole = lay
+            except ValueError: pass
+        else:
+            if whole is None: return None, 'level'
+            try: lv = [swizzle(other[k], whole[y['first'] + k]) for k in range(ny)]
+            except ValueError: return None, 'level'
+            plan[xi] = (y, 0, 0, lv); isfull.add(xi)
+            # the other's entries replace all of the texture's own
+            added += sum(36 + (len(lv[k]) if y['mips'][k]['data'] is not None else 0) for k in range(ny)) - sum(m['end'] - m['at'] for m in x['mips'])
+            continue
+        lv = [have[k - j] if j <= k < j + n else swizzle(other[k], lay[y['first'] + k]) for k in range(ny)]
+        plan[xi] = (y, j, n, lv)
+        # an inline level's entry holds its data: the layout's size, whatever the other build's linear level took
+        added += sum(36 + (len(lv[k]) if y['mips'][k]['data'] is not None else 0) for k in range(ny) if not j <= k < j + n)
+    s1 = s0 + added
+    ex, bulk, pos, marks = bytearray(), bytearray(), 0, []   # marks: (old .uexp position, how far what follows moved)
+    def pc_entry(top, dat):   # a level of the other build's chain: its entry, in the .uexp (inline) or the .ubulk
+        tail = struct.pack('<iii', top['w'], top['h'], top['d'])
+        if top['data'] is not None:
+            ex.extend(struct.pack('<iIiiq', 1, top['flags'], len(dat), len(dat), len(ex) + 24 + lo) + dat + tail)
+        elif top['flags'] & BULK_FILE:
+            ex.extend(struct.pack('<iIiiq', 1, top['flags'], len(dat), len(dat), len(bulk) - s1) + tail); bulk.extend(dat)
+        else: return 'format'
+    for xi, x in enumerate(bs):
+        y, j, n, lv = plan.get(xi, (None,) * 4)
         ex += ue[pos:x['fo']]; skip_at = len(ex) - (x['fo'] - x['skip'])
-        d = x['first'] - y['first'] if y else 0   # the mips this cook stripped
-        ex += struct.pack('<ii', y['first'] if y else x['first'], x['num'] + d)
         if y:
-            bpb, bw = FORMATS[x['pf']]
-            have = level_data(x['mips'][0], ue, ub, s0); other = level_data(y['mips'][d], pue, pub, pstart)
-            if have is None or other is None: return None, 'size'
-            w0, h0 = y['mips'][0]['w'], y['mips'][0]['h']
-            for sparse in (True, False):
-                lay = layout(w0, h0, bpb, bw, x['num'] + d, sparse)
-                if lay[d][4] == len(have) and swizzle(other, lay[d]) == have: break
-            else: return None, 'level'
-            for i in range(d):
-                top = y['mips'][i]; ptop = level_data(top, pue, pub, pstart)
-                if ptop is None: return None, 'size'
-                dat = swizzle(ptop, lay[i])
-                tail = struct.pack('<iii', top['w'], top['h'], top['d'])
-                if top['data'] is not None:   # an inline mip's place holds the layout's size, which must be the size the other build reserved: the inserted total was computed from it
-                    if len(dat) != top['disk']: return None, 'size'
-                    ex += struct.pack('<iIiiq', 1, top['flags'], len(dat), len(dat), len(ex) + 24 + lo) + dat + tail
-                else:
-                    ex += struct.pack('<iIiiq', 1, top['flags'], len(dat), len(dat), len(bulk) - s1) + tail; bulk += dat
-        for m in x['mips']:
+            ny = len(y['mips'])
+            ex += struct.pack('<ii', y['first'], ny)
+            struct.pack_into('<ii', ex, skip_at + 8, y['w'], y['h'])
+            for k in range(j):
+                if pc_entry(y['mips'][k], lv[k]): return None, 'format'
+        else: ex += struct.pack('<ii', x['first'], x['num'])
+        for m in ([] if xi in isfull else x['mips']):
             tail = ue[m['end'] - 12:m['end']]
             if m['data'] is not None:
                 ex += struct.pack('<iIiiq', 1, m['flags'], m['n'], m['disk'], len(ex) + 24 + lo) + ue[m['data']:m['data'] + m['disk']] + tail
@@ -158,14 +202,21 @@ def rebuild(ua, ue, ub, pue, pub, pstart, pairs):
                 if d is None: return None, 'size'
                 ex += struct.pack('<iIiiq', 1, m['flags'], m['n'], m['disk'], len(bulk) - s1) + tail; bulk += d
             else: return None, 'format'   # a payload at the end of the .uexp is not rebuilt
+        if y:
+            for k in range(j + n, ny):
+                if pc_entry(y['mips'][k], lv[k]): return None, 'format'
         pos = x['end']
         struct.pack_into('<q', ex, skip_at, len(ex) + lo)
         marks.append((x['end'], len(ex) - x['end']))
     ex += ue[pos:]
     if len(ex) != len(ue) + added: return None, 'size'
     nu = bytearray(ua)
-    if ua.count(struct.pack('<q', s0)) != 1: return None, 'format'
-    struct.pack_into('<q', nu, ua.find(struct.pack('<q', s0)), s1)
+    try: no = name_offset(ua)
+    except struct.error: return None, 'format'
+    if not 0 < no <= len(ua): return None, 'format'
+    at = ua.find(struct.pack('<q', s0), 0, no)   # the summary holds the value once: the name table and what follows may hold the same 8 bytes
+    if at < 0 or ua.find(struct.pack('<q', s0), at + 1, no) >= 0: return None, 'format'
+    struct.pack_into('<q', nu, at, s1)
     eo, esz, n = exports(ua)
     def moved(at): return next((d for e, d in reversed(marks) if e <= at), 0)
     for i in range(n):
@@ -173,7 +224,18 @@ def rebuild(ua, ue, ub, pue, pub, pstart, pairs):
         if off < lo or off + size > lo + len(ue): return None, 'format'
         d0, d1 = moved(off - lo), moved(off + size - lo)
         struct.pack_into('<qq', nu, o + 28, size + d1 - d0, off + d0)
-    return (bytes(nu), bytes(ex), bytes(bulk)), None
+    # read the new files back: every changed texture has the other's size and chain, every level its bytes at its place
+    ex = bytes(ex); nb = blobs(ex)
+    if len(nb) != len(bs): return None, 'size'
+    for xi, (y, j, n, lv) in plan.items():
+        z = nb[xi]
+        if (z['first'], z['num'], z['w'], z['h']) != (y['first'], len(y['mips']), y['w'], y['h']) or len(z['mips']) != len(y['mips']): return None, 'size'
+        for m, t, want in zip(z['mips'], y['mips'], lv):
+            if (m['w'], m['h'], m['d']) != (t['w'], t['h'], t['d']): return None, 'size'
+            if m['data'] is not None and m['off'] != m['at'] + 24 + lo: return None, 'size'
+            if level_data(m, ex, bulk, s1) != want: return None, 'level'
+    if full is not None: full.extend(sorted(isfull))
+    return (bytes(nu), ex, bytes(bulk)), None
 
 def compress(b):
     return [zlib.compress(b[i:i + BLOCK], 6) for i in range(0, len(b), BLOCK)] or [zlib.compress(b'')]
@@ -206,22 +268,23 @@ def index(paths, keys=None):
     return out
 
 def job(base):
-    """One package: (base, reason or None, [(path, chunks, raw size)...], bytes added)"""
+    """One package: (base, reason or None, [(path, chunks, raw size)...], bytes added, textures that took the other's whole chain)"""
     sw, pc = _w['sw'], _w['pc']
     def get(idx, name): k, n = idx[name]; return k.read(n)
     ua, ue = get(sw, base + '.uasset'), get(sw, base + '.uexp')
     ub = get(sw, base + '.ubulk') if base + '.ubulk' in sw else b''
-    if base + '.uexp' not in pc or base + '.uasset' not in pc: return base, 'missing', [], 0
+    if base + '.uexp' not in pc or base + '.uasset' not in pc: return base, 'missing', [], 0, 0
     pua, pue = get(pc, base + '.uasset'), get(pc, base + '.uexp')
     pairs, why = missing_mips(ue, pue)
-    if why: return base, why, [], 0
+    if why: return base, why, [], 0, 0
     pub = get(pc, base + '.ubulk') if base + '.ubulk' in pc else b''
-    res, why = rebuild(ua, ue, ub, pue, pub, len(pua) + len(pue) - 4, pairs)
-    if why: return base, why, [], 0
+    full = []
+    res, why = rebuild(ua, ue, ub, pue, pub, len(pua) + len(pue) - 4, pairs, full)
+    if why: return base, why, [], 0, 0
     nua, nue, nub = res
     files = [(base + '.uasset', compress(nua), len(nua)), (base + '.uexp', compress(nue), len(nue))]
     if nub: files.append((base + '.ubulk', compress(nub), len(nub)))
-    return base, None, files, len(nub) + len(nue) - len(ub) - len(ue)
+    return base, None, files, len(nub) + len(nue) - len(ub) - len(ue), len(full)
 
 def rows(path):
     out = []
@@ -255,17 +318,17 @@ def build(game_id, romfs, paks_dir, out):
             if not bases: raise Error(f'{preset}: no package matches {pats}')
             d = os.path.join(out, preset, os.path.dirname(rel)); os.makedirs(d, exist_ok=True)
             f = os.path.join(d, f'{stem}_99_P.pak'); tmp = f + '.tmp'
-            old = uepak.Pak(f) if os.path.exists(f) else None; n = 0; added = 0; skipped = dict.fromkeys(SKIPS, 0)
+            old = uepak.Pak(f) if os.path.exists(f) else None; n = 0; added = 0; nfull = 0; skipped = dict.fromkeys(SKIPS, 0)
             with uepak.LegacyPakWriter(tmp, '../../../', version) as w:
                 if old:
                     prefix = old.mount.replace('../../../', '')
                     for name in old.files: w.add(prefix + name, old.read(name))
-                for base, why, files, grew in pool.imap_unordered(job, bases, chunksize=8):
+                for base, why, files, grew, nf in pool.imap_unordered(job, bases, chunksize=8):
                     if why: skipped[why] += 1; continue
                     for path, chunks, raw in files: w.add_zlib(path, chunks, raw, BLOCK)
-                    n += 1; added += grew
+                    n += 1; added += grew; nfull += nf
             os.replace(tmp, f)
-            report.append(f'{preset}: {n} textures taken of {len(bases)} packages, {added / 1e9:.2f} GB of raw texels added, pak {os.path.getsize(f) / 1e9:.2f} GB; skipped ' + ', '.join(f'{k} {v}' for k, v in skipped.items() if v))
+            report.append(f'{preset}: {n} textures taken (full chain {nfull}) of {len(bases)} packages, {added / 1e9:.2f} GB of raw texels added, pak {os.path.getsize(f) / 1e9:.2f} GB; skipped ' + ', '.join(f'{k} {v}' for k, v in skipped.items() if v))
     finally:
         pool.close(); pool.join(); shutil.rmtree(lib, ignore_errors=True)
     return report
