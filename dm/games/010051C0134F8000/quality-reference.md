@@ -132,4 +132,4 @@ The player's session with the full set (2026-11-04, the Latino app, 70%, about 4
 
 ## Not checked
 
-Fights and towns as a measured route, real-time cutscenes' scene size, the High and Very high presets, handheld. A dinosaur stretch measured (the player saw it smooth), the robot entrance's stall on the Switch, My Hero One's Justice 2 in game with the new rule, iOS.
+Fights and towns as a measured route, real-time cutscenes' scene size, the High and Very high presets, handheld. A dinosaur stretch measured (the player saw it smooth), the robot entrance's stall on the Switch, iOS.

@@ -70,7 +70,7 @@ Not taken, and why:
 
 In the picture (100% crops) the canyon rocks show cracks and grain the pilot smeared; the characters (Piccolo, Goku) are nearly unchanged. The cost at the canyon is about +2 ms of GPU with the draws equal (inferred: bandwidth of the bigger mips); memory about +250 MiB footprint and +300-400 MB resident and GPU allocated, the app pool of 8 GB not approached and `r.Streaming.PoolSize` 3000 not exceeded. This is why the full set moved the scene percentage: at 80% the canyon was over budget on every frame, and the player chose 70% with the full set (2026-11-03). The measurements are in the [quality reference](quality-reference.md#pc-textures-full-set). Engine acceptance: 8 runs, 0 `[RED]`, no crash, no black or corrupt texture.
 
-The same tool serves MY HERO ONE'S JUSTICE 2 ([its note](../01007E700DBF6000/README.md)); with this rule it takes 5,663 textures (full chain 129), 7.72 GB raw, pak 3.68 GB, 141 failing the level check (the earlier rule took 5,646); not run in game with the new rule.
+The same tool serves MY HERO ONE'S JUSTICE 2 ([its note](../01007E700DBF6000/README.md)); with this rule it takes 5,663 textures (full chain 129), 7.72 GB raw, pak 3.68 GB, 141 failing the level check (the earlier rule took 5,646); its app with the new rule ran headless on 2026-11-04 with no red line and the fight at its earlier timing ([its note](../01007E700DBF6000/README.md#pc-textures)).
 
 ## Mac routes
 
