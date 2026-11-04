@@ -31,6 +31,7 @@ The game opens one audio renderer at boot and a second (48 kHz, 6 mix buffers) a
 
 - A fresh save: language select (A), the licence and privacy pages (R at about 1 s spacing turns pages, A on the last), the no-internet popup, the main menu. Adventure loads for about 90 s after "Third time is the charm" (a brown screen); Local Arcade, Single Race loads in about 20 s.
 - Driving: B accelerates, Y brakes and reverses, A uses the item; A and ZR do not drive (the input mask in `CKartControllerComponent::updateLinearVelocityInput`, `main+0xeb3460`). A kart that goes back to the start is an idle one.
+- `smoke.tsv` (for `scripts/regress.py`, checked on 2026-11-04: the race is up by the 100 s shot) starts from a copy of the user's save (`saves/arcade` in the NSP folder), presses through Local Arcade, Single Race at frames converted from the seconds of an earlier headless route, and holds B for 20 s once the race is up.
 
 ## Found on this game
 

@@ -76,6 +76,7 @@ The same tool serves MY HERO ONE'S JUSTICE 2 ([its note](../01007E700DBF6000/REA
 
 - A fresh save: A twice at the language screen, the opening movie about 2 minutes after boot, the EULA (Plus, Up, A), New Game, the first cinematic and the first Piccolo fight.
 - The user's state (`~/Library/Application Support/nxnative/010051C0134F8000/`) holds a save past the Piccolo fight; copy it into a run folder rather than writing there.
+- `smoke.tsv` (for `scripts/regress.py`) starts from the autosave at the start of Piccolo's canyon flight, kept as `saves/canyon` in the NSP folder. The harness runs the game at its own 30 fps and its first frame comes about 64 to 67 s after launch (frame f at about 65 + f/30 s): A at frames 1,500 and 1,900 take the title, A at 2,300 and 2,700 Continuar and the autosave, Up and A at 3,100 and 3,500 answer the load confirmation (Si), A at 3,900 and 4,300 dismiss the first tutorial bubble, and Piccolo stands on the canyon edge from about 215 s (shots at 250 and 300 s). Checked on two harness runs (7,567 and 7,457 frames in 330 s, both shots as described).
 
 ## Found on this game
 

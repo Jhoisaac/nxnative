@@ -48,6 +48,10 @@ How the game takes the container (read from `main`, build `14c878ec...`, not run
 
 Lightmaps (`*_BuiltData`) and meshes: not taken beyond what the textures rule accepts. Lightmaps are a different bake on the PC: of 6,075 lightmap textures in 213 packages, 4,229 have no partner of the same export name there, 1,080 partners differ at every level, 484 match; 34 change pixel format (B8G8R8A8 to DXT5, G8 to B8G8R8A8, DXT5 to DXT1), and 248 differ in size by other than a power of two. Taking them would mix two bakes with other lighting, so the rule does not. Static meshes: in a sample of 347, the PC's export data is 83 MB against 37.8 MB for the Switch's, and the Switch's data appears inside the PC's in 289, but the PC's legacy serialisation, extra LODs and `PhysXPC` names would need a converter to the zen layout; not attempted.
 
+## Mac routes
+
+- `smoke.tsv` (for `scripts/regress.py`) starts from a copy of the player's save, kept as `saves/story` in the NSP folder. The harness runs the game at 30 fps and its first frame comes about 88 s after launch (frame f at about 88 + f/29.3 s). A presses every 400 frames from 1,000 to 5,000 go through the autosave notice, the main menu (Story), the chapter, Begin Story and the cutscene; the player stands on the wisteria path from about 250 s (shot at 270 s), then `LUp~3` at frame 5,600 walks toward the two girls and the player stands there (shot at 320 s). Checked on two harness runs (baseline and candidate: 7,231 and 7,082 frames in 335 s, both shots as described).
+
 ## Found on this game
 
 - [Geometry draws keep the render pass across ordinary draws](../../../docs/reference/rendering.md#geometry-draws-keep-the-render-pass-across-ordinary-draws): 20 ms of GPU work a frame at 4K, its outline passes.

@@ -1,0 +1,14 @@
+# The user's save at the title (a copy in the NSP folder, saves/story, the work folder's saves/user). Frame numbers, not seconds: the host shares the Mac with other jobs. regress.py runs the game at its own
+# 30 fps (no launcher settings; the 60 fps of the Maximum preset is not set), and its first frame comes about 88 s after launch, so frame f is at about 88 + f/29.3 s. Timeline of a run with A every 400 frames
+# (the 20 shots every 15 s of the run that this route comes from): the autosave notice waits for the first A (frame 1,000, 121 s; logos SEGA, Aniplex and Unreal Engine before and after), the main menu is up by 160 s
+# (frame about 2,100) with Story highlighted, A at 2,200 takes it, 2,600 the chapter (shot 175 s), 3,000 Begin Story (190 s), then the cutscene and its dialogue (205 to 235 s) take the next presses; the player
+# stands on the wisteria path at about 250 s (frame about 4,750, objective "Talk to the Black-Haired Guide"). The last A is at 5,000; LUp held 3 s at frame 5,600 (about 280 s) walks toward the two girls.
+# Shots only while the player stands: before the walk (270 s) and after it (320 s). Presses and shots were checked on regress.py runs (see dm/games/0100309016E7A000/README.md, Mac routes)
+save	saves/story
+keys	f1000:A~0.2,f1400:A~0.2,f1800:A~0.2,f2200:A~0.2,f2600:A~0.2,f3000:A~0.2,f3400:A~0.2,f3800:A~0.2,f4200:A~0.2,f4600:A~0.2,f5000:A~0.2,f5600:LUp~3
+secs	335
+quick	90
+reach	6500@335
+window	290	40
+shots	270,320
+hang	30
