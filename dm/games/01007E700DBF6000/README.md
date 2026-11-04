@@ -50,7 +50,7 @@ Current, the full set: the pilot (the stage St204, the characters Pl00 and Pl02)
 
 ## The player's session
 
-Current: 28 minutes on 2026-11-03 at Maximum, fullscreen at 3840x2160, the full PC set (97,760 frames): picture approved by the player, 0 red lines, 0 audio underruns, exit 0, peak footprint 5.5 GB, 459 pipeline bases compiled in play with the archive that served no draw. Open:
+Current: 28 minutes on 2026-11-03 at Maximum, fullscreen at 3840x2160, the full PC set (97,760 frames): picture approved by the player, 0 red lines, 0 audio underruns, exit 0, peak footprint 5.5 GB, 459 pipeline bases compiled in play, with an archive that could not stand in for a draw. Open:
 
 - **Stretches at 20 fps** (open, cause unknown): frames about 23145-23586 and 96900-97800 hold a 50 ms frame at present interval 1. The game thread works about 8 ms of each frame and waits; two unnamed worker threads (0x100c, 0x100d) take about 300 ms/s each and energy per frame is about 21 times normal. GPU time does not limit them. Not reproduced in 5 headless runs: a fight, the results screen, pause, an exit to the menu, the story's tutorial and its movie `MV_Demo_m01.usm` at 60 fps. The first follows the tutorial fight's end (inferred). The player thinks the game was paused or its window had lost focus at those moments; that was not measured, so this stays open for a later look. To find it: pause the game and move the focus away in a played session, then `DM_NVN_TSV`, `DM_FSLOG` and `sample <pid>` during one.
 - **Frames 88801-89400:** the system discarded the drawables (181 in one window) while the game ran at 16.67 ms: not a game cost. Its cause is inferred, a screenshot or an overlay.
@@ -59,7 +59,7 @@ Current: 28 minutes on 2026-11-03 at Maximum, fullscreen at 3840x2160, the full 
 
 ## Pipelines
 
-Current: the profile has `depth_mode zero` (the game sets near = 0) and a prewarm list of 653 lines. Without the key the bundled archive served no draw; the log said `made for ... depth near=-w ... this run needs ... near=0`. Not measured yet: the archive built with the key.
+Current: the profile has `depth_mode zero` (the game sets near = 0) and a prewarm list of 653 lines. Without the key the bundled archive could not stand in for a draw; the log said `made for ... depth near=-w ... this run needs ... near=0`. That archive holds only bases without a vertex layout, so bases with a layout are still built on the device. The rebuilt app, first start headless on an empty state (Maximum, about 2.5 minutes): no stamp mismatch, 16 of 16 probed bases found, the prewarm compiled 285 bases with a layout in 6 s in the background, 0 red lines. Not measured: a stand-in actually taken from it, and a played session.
 
 ## Found on this game
 

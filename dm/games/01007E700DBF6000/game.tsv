@@ -47,7 +47,7 @@ tex_flush_upload	on
 tex_dirty_upload	on
 
 # The game sets NVN's near = 0 depth mode, so the pipeline bases made before it runs (the app's offline archive) take the main0_z vertex entries;
-# without this key they were made for near=-w and no draw found them (the log's "pipeline archive bundled with the app: made for ... depth near=-w").
+# without this key they were made for near=-w and could not stand in for a draw (the log's "pipeline archive bundled with the app: made for ... depth near=-w").
 depth_mode	zero
 
 # ---- Graphics quality ----

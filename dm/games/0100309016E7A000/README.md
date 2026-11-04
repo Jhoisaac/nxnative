@@ -32,7 +32,9 @@ Current: 75 minutes on 2026-11-03 at Maximum, fullscreen at 3840x2160, story and
 
 What the player saw as drops: first-time pipelines hold 19 of the 28 moments under about 50 fps after boot, and about 70% of all the time lost (worst frame 729.8 ms, frame 258859). Most of the rest are short game-side stalls with no pipeline (0.6 s, frames up to 88 ms, at frames 139500 and 158114). Separately, a few scenes cost real GPU: 18.5 ms at frames 195601-196500 (about 56 fps), 17.5 ms at frames 61801-62400 and 216601-216900. Which screens those are is not known yet: the log does not name them.
 
-Pipelines: the log said `pipeline archive bundled with the app: made for ... depth near=-w ... this run needs ... near=0`. The profile had no `depth_mode`, so the 657 MB archive served no draw and the session compiled 1,783 bases, 73.5 s of compiler time, against 88 bases in a 498,900 frame session of Demon Slayer 2. The profile now has `depth_mode zero` and a prewarm list of 3,877 lines from this session. Not measured yet: the archive built with the key.
+Pipelines: the log said `pipeline archive bundled with the app: made for ... depth near=-w ... this run needs ... near=0`. The profile had no `depth_mode`, so the 657 MB archive could not stand in for a draw, and the session compiled 1,783 bases, 73.5 s of compiler time. That archive holds only bases without a vertex layout (the pulling stand-ins), so the key alone does not remove those compiles: bases with a layout are built on the device. The profile now has `depth_mode zero` and a prewarm list of 3,877 lines from this session.
+
+The rebuilt app, first start headless on an empty state (Maximum, 3 minutes): no stamp mismatch, 16 of 16 probed bases found, so the device builds none of the pairs' bases itself. The prewarm compiled 1,656 bases with a layout in 28 s in the background, at 59.8 fps by the end, 0 red lines. They are in the device archive from the second start. Not measured: a stand-in actually taken from the rebuilt archive (no draw needed one in that run), and a played session.
 
 ## Found on this game
 
