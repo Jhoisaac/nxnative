@@ -47,3 +47,8 @@ present_interval	display
 # 60 fps on the Mac, 30 selectable in the launcher: with present_interval display the host presents one frame per display tick, or one per two at the 30 cap (DM_FPS_TARGET), and the
 # game, which steps by wall-clock time, keeps its speed. No rewriter stub or memory write is involved: the key only sets the cap the presentation follows (hle_nvn.c fps_present_cap)
 fps_target	60
+
+# ---- Pipeline bases ----
+# The game sets near = 0 (its log: "this run needs ... depth near=0"), so the pipeline bases made before it runs (the app's offline archive) take the main0_z vertex entries; without
+# this key they were made for near = -w and could not stand in for a draw, and the device had to build them itself
+depth_mode	zero
