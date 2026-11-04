@@ -42,7 +42,7 @@ shader_note	Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles shaders (pro
 
 # ---- Graphics ----
 # The game sets NVN's near = 0 depth mode, so the pipeline bases made before it runs (the app's offline archive) take the main0_z vertex entries.
-# Without this key they were made for near=-w and no draw found them: 1,783 bases compiled during a 75 minute session.
+# Without this key they were made for near=-w and could not stand in for a draw, and the device had to prebuild them itself.
 depth_mode	zero
 
 # ---- Graphics quality ----

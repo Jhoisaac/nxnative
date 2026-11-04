@@ -27,9 +27,18 @@ The player's 75 minute session (`<work>/q/play/session_2026-11-03_1139.log`), be
 ## Not applied, not measured
 
 - Ambient occlusion, bloom, LOD, effects: the next pass, with a fight to measure in.
-- Better audio: not compared, no PC copy. The sound is inside the IoStore containers and paks (no loose `.awb`), so a comparison needs the PC copy and a look into its packages.
-- PC textures: no PC copy yet. This game is UE 4.25 with IoStore containers, so `ue_pc_assets.py` (made for UE 5) may need work; not checked.
+- PC textures, lightmaps and meshes: worth having, not integrated ([below](#against-the-pc-build)).
+
+## Against the PC build
+
+The Steam build (2 legacy paks, version 9, not encrypted, 25.8 GB) against Switch 1.53, read from the packages without running either game. Scratch tables: `<work>/q/pc`.
+
+- **Audio: the same.** CRI ADX2, in `.awb` inside the paks on both sides. 129 of 131 `.awb` are byte-identical by SHA-256 (2.48 GB); the other two, `V_MAIN05` in English and Japanese, hold one clip that sits in the AWB on PC and in the ACB on Switch, with the same bytes. 294 of 296 ACB tables are identical; the other two differ for that clip. ADX mono 48 kHz about 216 kbps (22,361 tracks), stereo about 432 kbps (287), and 206 tiny HCA not decoded.
+- **Movies: the same picture, other encodes.** 54 of 54 match by name, 1920x1080 at 30 fps with equal frame counts. PC: MPEG-1 at about 12.1 Mbps with ADX sound (432 and 216 kbps), 9.39 GB. Switch: VP9 at about 1.18 Mbps with HCA sound (96 and 64 kbps), 1.06 GB. On the one dark scene sampled (`dm0020`), PSNR 45-47 dB and SSIM 0.99, so little to gain there. Which movie sound is closer to the master is undetermined, busy scenes were not sampled, and whether the Switch's CRI runtime plays MPEG-1 was not checked.
+- **Textures: the PC has more.** Of 200 sampled matched textures, 133 have a larger top level (96 with 4 times the pixels, 19 with 16 times), 63 are equal, and 197 have the same format. Matched `Texture2D`: 3.56 GB on PC against 1.67 GB, about 1.9 GB more if all were taken (extrapolated).
+- **Lightmaps and meshes: larger on PC.** Lightmap packages 6.79 GB against 1.23 GB. Static meshes 910 MB against 432 MB of raw bytes, skeletal 2,125 MB against 1,524 MB; whether that is extra LODs or precision was not parsed.
+- **Tools: new work.** Both are UE 4.25 with unversioned properties, but Switch keeps its packages in IoStore TOC version 2. `ue_pc_paks.py` writes for a legacy Switch pak, and `ue_pc_assets.py` for UE 5's container; a 4.25 path needs a version 2 writer. Whether the 4.25 loader lets a patch container override another was not checked.
 
 ## Not checked
 
-Headless: a fight. The offline archive rebuilt with `depth_mode zero`, and a first start with the seeded list on an empty state. Which scenes cost 17.5-18.5 ms of GPU. the High and Very high presets at 60, the player's judgement.
+Headless: a fight. A stand-in taken from the archive rebuilt with `depth_mode zero`, and a played session on it. Which scenes cost 17.5-18.5 ms of GPU. the High and Very high presets at 60, the player's judgement.

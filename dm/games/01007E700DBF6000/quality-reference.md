@@ -51,4 +51,4 @@ Compared on 2026-11-03: all 1,371 files of `HeroGame/Content/CriWareData` are by
 
 ## Not checked
 
-A session over 28 minutes, the other presets (High, Very high), handheld, the archive rebuilt with `depth_mode zero`, and the stage's lighting on a real Switch or PC. One run (`t1_base`) logged a GPU recovery (`kIOGPUCommandBufferCallbackErrorInnocentVictim`, 68 lines, then frames went on) that no other of 17 runs showed; cause not found, open.
+A session over 28 minutes, the other presets (High, Very high), handheld, a played session on the archive rebuilt with `depth_mode zero`, and the stage's lighting on a real Switch or PC. One run (`t1_base`) logged a GPU recovery (`kIOGPUCommandBufferCallbackErrorInnocentVictim`, 68 lines, then frames went on) that no other of 17 runs showed; cause not found, open.
