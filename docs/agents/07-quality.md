@@ -97,6 +97,15 @@ Checks for a new game:
 3. Boot with the preset and check that the game reads `<stem>_99_P.ucas` when the chosen packages load, that no `[RED]` line appears, and the memory lines (`[mem] alias region mapped`, `DM_MEMSTAT`).
 4. Compare a scene with and without the container, with the same `ue_quality.tsv` rows in both, and once with the textures only. A lightmap package changes the scene's lighting, not only its detail, so judge it on its own.
 
+## Unreal Engine 4.25
+
+Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles keeps its packages in IoStore containers of TOC version 2 (zen packages, ExportBundleData is chunk type 2, bulk data type 3, container header type 10, Zlib blocks, no perfect hash), and the PC build keeps legacy paks (version 9). A PC package cannot replace a zen package, so `dm/tools/ue_pc_assets.py` hands such a game to `dm/tools/ue_pc_zen4.py`, which keeps the Switch package and rebuilds the texture platform data:
+
+- When every stored Switch level is the PC level of its size (block-linear swizzle tried, as in `ue_pc_paks.py`), the PC's top levels are added. When the first stored level matches and a later one does not (the same image encoded again), the PC's whole chain replaces the Switch's, so no texture mixes the builds (`full chain` in the report). Otherwise the Switch's stays. Skip reasons are counted in the report.
+- The container is written with `uepak.write_toc2` and `container_header2` as `<stem>_99_P.utoc` / `.ucas` in the preset's folder, beside the preset's pak. The game mounts it with that pak: in the Switch `main` (1.53) the pak mount gives the container the pak's order plus 100 times the number in a `_P` pak's name, and the chunk lookup walks the containers by order and takes the first that holds the ID. That was read from the code, not run: see the game's note.
+- `ue_quality.tsv`'s Maximum row sets `LODBias=1>0` so the engine asks for the extra level.
+- Only `textures` rows exist for this engine. Lightmaps are a different bake on the PC (most textures have no partner by export name, most partners differ), so they are taken only where the textures rule accepts them; meshes were not attempted ([the game's note](../../dm/games/0100309016E7A000/README.md#pc-assets)).
+
 ## Pak games
 
 A game with no IoStore container cannot take another platform's packages: `ue_pc_assets.py` hands such a game to `dm/tools/ue_pc_paks.py`. What moves is the texel data. On My Hero One's Justice 2 (UE 4.21, pak version 7), each Switch mip is the PC mip of its size, swizzled, byte for byte; the Switch's are block-linear in the shape of 64 KB tiles (8 GOBs for 8- and 16-byte blocks, shrinking with the level's rows) and the PC's linear, and the cook stripped the top one (`FirstMip` 1 there, 0 on the PC).

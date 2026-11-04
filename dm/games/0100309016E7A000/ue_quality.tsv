@@ -31,7 +31,7 @@ max	APK/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DevicePro
 max	APK/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Streaming.PoolSize	3000
 max	APK/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.MaxResolution	1024
 max	APK/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	r.Shadow.MaxCSMResolution	2048
-max	APK/Platforms/Switch/Config/SwitchDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	MinMagFilter=linear>aniso,MipFilter=point>linear
+max	APK/Platforms/Switch/Config/SwitchDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	MinMagFilter=linear>aniso,MipFilter=point>linear,LODBias=1>0
 max	APK/Platforms/Switch/Config/SwitchDeviceProfiles.ini	SwitchConsole DeviceProfile	rhi.SyncInterval	1
 max	APK/Config/DefaultEngine.ini	/Script/Engine.Engine	=FixedFrameRate	60.000000
 max	APK/Config/DefaultGame.ini	/Script/APK.APKDemoManager	=MaxFrameRateUsedInCinema	60.0
