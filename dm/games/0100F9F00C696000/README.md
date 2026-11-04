@@ -11,6 +11,7 @@ Status: played on the Mac by the user at 60 fps with sound: the language select,
 | `present_interval display`, `fps_target 60` | `game.tsv` | one frame per display tick, so 60 fps; the game's speed does not depend on the frame count (below) |
 | `mem_reserve 0x100000000`, `app_pool 0xCD500000`, `sys_resource 0x0` | `game.tsv` | main sets a heap of at most the pool minus 64 MB (3,328 MB), and the NPDM declares no system resource, so `IsVirtualAddressMemoryEnabled` is false as on Horizon |
 | `shader_groups /archives/=archives /ghosts/=ghosts /dlog/=dlog` | `game.tsv` | the shader split's source groups: the effect files of the Alchemy archives |
+| `depth_mode zero` | `game.tsv` | the game sets near = 0: the app's log said `pipeline archive bundled with the app: made for ... depth near=-w ... this run needs ... depth near=0`, so the bundled archive could not stand in for a draw and the device built its bases itself. Added 2026-11-04; the rebuilt app, headless: no mismatch line, 16 of 16 probed bases found, 0 red lines, a race drawn right |
 
 ## Frame rate
 
