@@ -5,7 +5,8 @@
 # holding every chunk of each chosen package as the other platform stores it (blocks copied verbatim, nothing recompressed) and a container header with that platform's store entries (imports, shader map
 # hashes). The host serves the container from the preset's folder (hle_fs.c, DM_UE_QUALITY=<preset>) and the game mounts <stem>_99_P with its pak with priority, so the packages' chunks resolve to the other
 # platform's. The inputs are the player's own folders (nothing is copied into the repository); the output goes to <out dir>; a pak beside the container is written empty when ue_quality.py wrote none.
-# Table rows: preset <TAB> rule <TAB> pattern (fnmatch on the package path without "../../../" and the extension, case-insensitive; # starts a comment). Rule `textures`: the packages that are textures whose
+# A game on Unreal Engine 4.25 (the Switch's containers are TOC version 2 and the PC build keeps legacy paks: Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles) goes to ue_pc_zen4.py: the PC's chunks cannot be copied there, so the Switch's package
+# gets the PC's top mip levels added (rule `textures` only). Table rows: preset <TAB> rule <TAB> pattern (fnmatch on the package path without "../../../" and the extension, case-insensitive; # starts a comment). Rule `textures`: the packages that are textures whose
 # top mip there has more pixels than here (same pixel format); rule `package`: every match (a map's *_BuiltData lightmaps). A pattern that matches no Switch package stops with a message and a non-zero exit.
 # A package is skipped, and counted in the report, when it is missing there, its imports or shader map hashes differ (its chunks would not fit the Switch's other packages), or (textures) is not
 # larger, has another pixel format, shows no texture data in the first 64 KB, or (textures) has another name map than the Switch's (a platform name such as PhysXPC or PCD3D_SM5, a map or
@@ -207,11 +208,16 @@ def build(game_id, romfs, paks, out, host, modules):
     import game
     g = game.load(game_id); tsv = g.table('ue_pc_assets.tsv')
     if not tsv.is_file(): raise Error(f'game profile {game_id} has no ue_pc_assets.tsv')
-    if not uepak.io_tocs(romfs):   # a game with no IoStore container: a pak game's packages cannot move between platforms, its texels can (ue_pc_paks.py)
+    tocs = uepak.io_tocs(romfs)
+    if not tocs:   # a game with no IoStore container: a pak game's packages cannot move between platforms, its texels can (ue_pc_paks.py)
         import ue_pc_paks
         return ue_pc_paks.build(game_id, romfs, paks, out)
     table = rows(tsv)
     if not table: raise Error(f'{tsv} has no rows')
+    if any(t.version < 4 for t in tocs):   # Unreal Engine 4.25 (TOC version 2, zen packages against a legacy pak on the PC): the texel data moves, not the packages (ue_pc_zen4.py)
+        import ue_pc_zen4
+        try: return ue_pc_zen4.build(table, romfs, paks, out)
+        except ue_pc_zen4.Error as e: raise Error(str(e))
     dec = uepak.Lazy(lambda: uepak.OodleHost(host, modules, os.environ))
     try: return build_rules(table, romfs, paks, out, dec)
     finally: dec.close()

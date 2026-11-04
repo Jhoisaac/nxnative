@@ -1,0 +1,5 @@
+# Another platform's textures for a preset (dm/tools/ue_pc_assets.py, its Unreal Engine 4.25 path dm/tools/ue_pc_zen4.py, builds an IoStore patch container per preset from the player's own PC copy, given to the NSP script; dm/host/hle_fs.c serves it with the preset).
+# Columns, separated by tabs: preset, rule, pattern. Rule textures: the textures matching the pattern whose PC build keeps top mips this Switch cook stripped (the device profile's LODBias=1, which ue_quality.tsv's max row sets to 0) or a larger size
+# (MaxLODSize); the Switch package is kept and the PC's levels added after a byte-for-byte check of the first level the Switch holds. Patterns: fnmatch on the package path without ../../../ and the extension. This engine takes `textures` rows only.
+# 2026-11-03: the Maximum preset takes every texture the rule accepts (static comparison and generation only; not run in the game yet).
+max	textures	*

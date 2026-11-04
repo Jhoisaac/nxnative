@@ -45,6 +45,14 @@
 #   TOC version 5, blocks of 64 KB, no directory index (size 0, flag 8 clear), no encryption or signing; flag 1 when any block is Oodle-compressed (method names: "Oodle" only). The chunks are stored in
 #   perfect hash slot order (io_perfect_hash: seed count ceil(n / 2), no overflow list), each chunk's offset in the uncompressed stream a multiple of 64 KB, its blocks in the .ucas 16-aligned.
 #   After the blocks and method names come the chunk metas (32-byte chunk hash, u8 flags) the engine reads for every chunk. container_header builds the container header chunk (type 6, version 3).
+# Writing a version 2 container (write_toc2; Unreal Engine 4.25: Demon Slayer -Kimetsu no Yaiba- The Hinokami Chronicles, pakchunk0-Switch.utoc, 97,037 chunks): the same 144-byte header with version 2, a partition count of 0 (the field is
+#   not used before version 3), and no partition size, perfect hash seeds or overflow list, so the chunks keep the order given (the engine builds its table by ID at mount) and the tables run from the chunk IDs straight to the blocks.
+#   Blocks of 64 KB, stored or "Zlib" (the game's own containers are Zlib; the method names hold that one name), flag 1 when any block is compressed, flag 8 and a directory index only when paths are given; the .ucas ends 16-aligned (the padding between blocks is zero here, random bytes in the game's).
+#   How the game picks between two containers (main of 1.53, read from the code): the pak mount sets the container's order to the pak's order + 100 * the number in the name of a _P pak (0x4758068, madd) and inserts the reader
+#   into a list sorted by order, highest first, later mount first among equals (0x2e98a1c, the insertion); the chunk lookup walks that list and takes the first container that holds the ID (0x2eb33bc), so a chunk ID that two
+#   containers hold resolves to the patch <stem>_99_P.utoc. container_header2 builds the container header chunk (type 10): u64 container ID, u32 package count, byte arrays of names and name hashes (the game's have no names
+#   and the 8-byte algorithm ID 0xC1640000 as hashes), the package IDs (u64), and the store entries as one byte array: a 32-byte entry per package {u64 export bundles size (the length of the package's chunk), i32 export count,
+#   i32 export bundle count, u32 load order, u32 0, u32 imported package count, u32 offset of the imports from the count's own address} then the imports (u64 each), then two more arrays the game's pakchunk0 fills (a culture map {"ko": 32 pairs of package IDs} and the package redirects; ours have none: two zero counts); zero-padded to a multiple of 64 KB as the cooker does.
 # Shader code archive (version 2): shader map hashes (20 bytes each), shader hashes (20 each), shader map entries {u32 first index, u32 shader count, u32 first preload, u32 preload count}, shader
 #   entries {u64 offset, u32 size, u32 raw size, u8 frequency} (17 bytes, packed), preload entries (16 each), shader indices (u32): each array is a u32 count and its elements; the code follows,
 #   offsets relative to its start. A shader whose size differs from its raw size is compressed.
@@ -698,13 +706,15 @@ def dir_index(files, mount='../../../'):
     return (fstring(mount) + struct.pack('<I', len(dirs)) + b''.join(struct.pack('<4I', *d) for d in dirs) + struct.pack('<I', len(fl)) + b''.join(struct.pack('<3I', *f) for f in fl)
             + struct.pack('<I', len(strs)) + b''.join(fstring(t) for t in strs))
 
-def write_toc(stem, name, chunks, paths=None):
+def write_toc(stem, name, chunks, paths=None, version=5):
     """An IoStore container (see "Writing an IoStore container" in the notes above) at stem + '.utoc' and stem + '.ucas' (stem: a path without extension), name = the container's name for its ID
     (the file stem); chunks = [dict(id=12 bytes, size=raw length, blocks=[(stored bytes or a zero-argument function returning them, raw size, method '' or 'Oodle')], meta=33 bytes or None (32 zero
     bytes, flag from the blocks))]. The .ucas is written as the blocks come (a function is called once, when its block is written, and its length checked then), so only the tables stay in memory.
     paths = {chunk ID: path starting "../../../"} also writes a directory index (flag 8). Each chunk is ceil(size / 64 KB) blocks, all 64 KB raw but the last. → the container ID. ValueError for what
     the engine would not read: duplicate IDs, blocks that do not fit that rule, a stored block whose length is not its raw size, another method, a size of 2^40 or more, a stored block of 2^24 or
-    more. The file is read back and every ID looked up as the engine does"""
+    more. The file is read back and every ID looked up as the engine does. version 2 (write_toc2): see "Writing a version 2 container"; the methods are '' and 'Zlib' there"""
+    if version not in (2, 5): raise ValueError(f'TOC version {version} is not written')
+    methods_ok = ('', 'Oodle') if version == 5 else ('', 'Zlib')
     ids = [c['id'] for c in chunks]
     if any(len(i) != 12 for i in ids): raise ValueError('a chunk ID is not 12 bytes')
     for c in chunks:
@@ -714,10 +724,10 @@ def write_toc(stem, name, chunks, paths=None):
         if c.get('meta') is not None and len(c['meta']) != 33: raise ValueError(f"{c['id'].hex()}: a meta is 33 bytes")
         for k, (d, raw, meth) in enumerate(blks):
             if raw != min(IO_BLOCK, size - k * IO_BLOCK): raise ValueError(f"{c['id'].hex()}: block {k} has raw size {raw}")
-            if meth not in ('', 'Oodle'): raise ValueError(f"{c['id'].hex()}: method {meth!r}")
+            if meth not in methods_ok: raise ValueError(f"{c['id'].hex()}: method {meth!r}")
             if not callable(d) and (not meth and len(d) != raw or len(d) >= 1 << 24): raise ValueError(f"{c['id'].hex()}: block {k} is {len(d)} bytes, raw size {raw}")
     if paths is not None and not set(paths) <= set(ids): raise ValueError('paths names a chunk that is not in the container')
-    slots, seeds = io_perfect_hash(ids)
+    slots, seeds = io_perfect_hash(ids) if version == 5 else (list(range(len(ids))), [])
     cid = io_container_id(name); compressed = any(m for c in chunks for _, _, m in c['blocks'])
     rng, blk, metas, voff, pos = bytearray(), bytearray(), bytearray(), 0, 0
     with open(stem + '.ucas', 'wb') as uf:
@@ -732,19 +742,53 @@ def write_toc(stem, name, chunks, paths=None):
                 if pos >= 1 << 40: raise ValueError('the .ucas is larger than 2^40 bytes')
                 blk += pos.to_bytes(5, 'little') + len(d).to_bytes(3, 'little') + raw.to_bytes(3, 'little') + bytes([1 if meth else 0]); uf.write(d); pos += len(d)
             metas += c['meta'] if c.get('meta') is not None else bytes(32) + bytes([1 if any(m for _, _, m in c['blocks']) else 0])
+        if version == 2: uf.write(bytes(-pos & 15))   # the game's .ucas ends 16-aligned
     di = dir_index([(paths[ids[sl]], k) for k, sl in enumerate(slots) if ids[sl] in paths]) if paths else b''
-    head = bytearray(144); head[:16] = TOC_MAGIC; head[16] = 5
-    struct.pack_into('<9I', head, 20, 144, len(chunks), len(blk) // 12, 12, int(compressed), 32, IO_BLOCK, len(di), 1)
+    head = bytearray(144); head[:16] = TOC_MAGIC; head[16] = version
+    struct.pack_into('<9I', head, 20, 144, len(chunks), len(blk) // 12, 12, int(compressed), 32, IO_BLOCK, len(di), 1 if version == 5 else 0)
     struct.pack_into('<Q', head, 56, cid); head[80] = (1 if compressed else 0) | (8 if di else 0)
-    struct.pack_into('<IQI', head, 84, len(seeds), 0xFFFFFFFFFFFFFFFF, 0)
-    toc = bytes(head) + b''.join(ids[sl] for sl in slots) + bytes(rng) + struct.pack(f'<{len(seeds)}i', *seeds) + bytes(blk) + (b'Oodle' + bytes(27) if compressed else b'') + di + bytes(metas)
+    if version == 5: struct.pack_into('<IQI', head, 84, len(seeds), 0xFFFFFFFFFFFFFFFF, 0)
+    method = (b'Oodle' if version == 5 else b'Zlib').ljust(32, b'\0')
+    toc = bytes(head) + b''.join(ids[sl] for sl in slots) + bytes(rng) + struct.pack(f'<{len(seeds)}i', *seeds) + bytes(blk) + (method if compressed else b'') + di + bytes(metas)
     with open(stem + '.utoc', 'wb') as f: f.write(toc)
     t = Toc(stem + '.utoc')
-    if t.version != 5 or t.seeds != seeds or len(t.ids) != len(ids): raise ValueError(f'{stem}.utoc does not read back')
+    if t.version != version or t.seeds != seeds or len(t.ids) != len(ids): raise ValueError(f'{stem}.utoc does not read back')
     for k, c in enumerate(t.ids):
-        if io_lookup(t.ids, t.seeds, c) != k: raise ValueError(f'{stem}.utoc: chunk {c.hex()} is not found by the perfect hash')
+        if version == 5 and io_lookup(t.ids, t.seeds, c) != k: raise ValueError(f'{stem}.utoc: chunk {c.hex()} is not found by the perfect hash')
+        if version == 2 and t.ids[k] != ids[k]: raise ValueError(f'{stem}.utoc: chunk {k} reads back as another ID')
     if paths and len(t.paths()) != len(paths): raise ValueError(f'{stem}.utoc: the directory index does not read back')
     return cid
+
+def write_toc2(stem, name, chunks, paths=None):
+    """write_toc for TOC version 2 (Unreal Engine 4.25; see "Writing a version 2 container" in the notes above): the chunks in the order given, blocks stored ('') or 'Zlib' (stored bytes as zlib.compress gives them)"""
+    return write_toc(stem, name, chunks, paths, 2)
+
+def container_header2(cid, entries):
+    """A container header chunk (type 10, Unreal Engine 4.25; layout in the notes above) for entries = [(package ID, export bundles size, export count, export bundle count, load order, (imported package IDs))],
+    zero-padded to a multiple of 64 KB; stored uncompressed or Zlib by the caller"""
+    head, tail = bytearray(), bytearray(); base = 32 * len(entries)
+    for j, (pid, size, nex, nbun, order, imps) in enumerate(entries):
+        eo = 32 * j; oi = base + len(tail) - (eo + 0x18) if imps else 0; tail += struct.pack(f'<{len(imps)}Q', *imps)
+        head += struct.pack('<QiiIIII', size, nex, nbun, order, 0, len(imps), oi)
+    store = bytes(head + tail); hashes = struct.pack('<Q', 0xC1640000)
+    d = (struct.pack('<QIi', cid, len(entries), 0) + struct.pack('<i', len(hashes)) + hashes + struct.pack('<i', len(entries)) + struct.pack(f'<{len(entries)}Q', *[e[0] for e in entries])
+         + struct.pack('<i', len(store)) + store + bytes(8))   # then the culture map and the package redirects: none
+    return d + bytes(-len(d) % IO_BLOCK)
+
+def read_container_header2(d):
+    """A container header chunk (container_header2's layout) → dict(cid=, entries=[(package ID, export bundles size, export count, export bundle count, load order, (imported IDs))]); ValueError for a header that
+    ends inside an array, has names (the layout the game's use has none) or a package count that is not the ID count"""
+    r = R(d, what='container header'); cid = r.take('<Q'); count = r.take('<I')
+    if r.take('<i'): raise ValueError('container header: names are not read')
+    r.raw(r.take('<i')); n = r.take('<i')
+    if n != count: raise ValueError(f'container header: {count} packages, {n} package IDs')
+    pids = r.array('Q', n); store = r.raw(r.take('<i')); out = []
+    if len(store) < 32 * n: raise ValueError('container header: store entries are cut short')
+    for j, pid in enumerate(pids):
+        size, nex, nbun, order, _, ni, oi = struct.unpack_from('<QiiIIII', store, 32 * j); at = 32 * j + 0x18 + oi
+        R(store, at, 'container header').need(8 * ni if ni else 0)
+        out.append((pid, size, nex, nbun, order, struct.unpack_from(f'<{ni}Q', store, at) if ni else ()))
+    return dict(cid=cid, entries=out)
 
 def container_header(cid, entries):
     """A container header chunk (type 6, stored uncompressed), version 3, for entries = [(package ID, (imported package IDs), (20-byte shader map hashes))]: u32 signature 0x496f436e, u32 version,
