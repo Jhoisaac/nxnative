@@ -36,6 +36,26 @@ The `.usm` cinematics (257 loose files in `AT/Content/Movies`, 6.2 GB: VP9 1920x
 
 - 2 pak files (version 8) plus 7,988 loose `.uasset` files in the RomFS; the packed Mac app is 25.5 GB (a 24.3 GB RomFS image). The shaders are inline in the cooked packages: 75,430 in the split, global and material shaders ([Unreal Engine 4.21 to 4.25 paks (versions 7, 8 and 9) and 4.25 IoStore containers](../../../docs/reference/shaders.md#unreal-engine-421-to-425-paks-versions-7-8-and-9-and-425-iostore-containers)). A fresh save boots to the language select, the EULA (the dialog defaults to Decline: Up, then A), the privacy page and the title (Version 1.70) with no `is not in the shader map` line.
 
+## Graphics quality
+
+`ue_quality.tsv` gives the settings window's **Graphics quality** row (`DM_UE_QUALITY`): Switch (off, the default), High (1080p), Very high (1440p), Maximum (4K output). Unreal reads its device-profile cvars from `AT/Config/Switch/SwitchDeviceProfiles.ini` in `pakchunk0-Switch.pak` at boot, so a preset is a pak `pakchunk0-Switch_99_P.pak` with that ini edited, version 8 like the game's ([how](../../../docs/agents/07-quality.md)). Current, Mac only. The per-machine results are in the [quality reference](quality-reference.md). PC textures are a separate change and are not part of these presets.
+
+The profile also sets `ue_quality_app_pool` (8 GB: Unreal's allocator budgets against the reported pool, and the Switch's 3.21 GB does not fit 4K targets) and `depth_mode zero` (the game sets near = 0, so the app's offline pipeline archive takes the `main0_z` vertex entries; without the key its bases were made for near = -w and could not stand in for a draw).
+
+The Switch asks 1600x900 with dynamic resolution, `LODBias` 2 on the world and character texture groups (1 on effects and lightmaps), and lower `sg.*` groups.
+
+| Row | High | Very high | Maximum |
+|---|---|---|---|
+| `r.setres` | 1920x1080 | 2560x1440 | 3840x2160 |
+| `r.ScreenPercentage` | 100 | 100 | 70 (the scene 2688x1512, the interface at 4K) |
+| `r.DynamicRes.OperationMode` | 0 | 0 | 0 |
+| `r.MaxAnisotropy`; the groups' `linear` becomes `aniso`, mip `point` becomes `linear` | 8 | 8 | 16 |
+| `r.Streaming.PoolSize` | 1600 | 1600 | 3000 |
+
+Maximum also raises shadows (`r.Shadow.MaxResolution` and `MaxCSMResolution` 2048, 4 cascades, `r.ForceLODShadow` -1, landscape shadows), post-processing (bloom 5, lens flares, light shafts, tonemapper 5), LOD and foliage (`r.ViewDistanceScale` 2, `r.StaticMeshLODDistanceScale` 0.5, `r.LandscapeLODDistributionScale` 2), ambient occlusion and effects, and `LODBias` to 0 on the groups that had 2 or 1. The whole set is the reason for a scene below native: each group alone passes at 90% on the forest walk, all together at 90% leave 25.88% of its frames over budget, and at 100% with nothing else 36.48%. Maximum was 80% until the player's decision of 2026-11-03 to take 70%, because the east canyon flight was over budget at 80% ([result](quality-reference.md#the-east-canyon)).
+
+**Cinematics.** The 257 movies are `.usm` VP9 outside the paks, so resolution does not raise them. The PC's movies are MPEG-2 (CRI Prime), which the Switch's player shows as a black screen, so they cannot replace them; re-encoding was not tried. Real-time cutscenes were not sampled for their scene size.
+
 ## Mac routes
 
 - A fresh save: A twice at the language screen, the opening movie about 2 minutes after boot, the EULA (Plus, Up, A), New Game, the first cinematic and the first Piccolo fight.
@@ -48,6 +68,7 @@ General changes first needed here; each applies to every game:
 - **Unreal Engine 4.21 to 4.25 paks in the shader split** (`uepak.py`, `shader_split.py` `ue_io_jobs`): [Unreal Engine 4.21 to 4.25 paks (versions 7, 8 and 9) and 4.25 IoStore containers](../../../docs/reference/shaders.md#unreal-engine-421-to-425-paks-versions-7-8-and-9-and-425-iostore-containers).
 - **Movie output into BGRA8 / BGRX8 textures** (`nvn_host_write_texture`): [Native-texture output into BGRA8 / BGRX8 textures](../../../docs/reference/movies.md#native-texture-output-into-bgra8--bgrx8-textures).
 - **Streamed mips written to uncached pools** (profile keys `tex_flush_upload`, `tex_dirty_upload`, current): [CPU writes with no flush, caught by page protection](../../../docs/reference/nvn-objects.md#cpu-writes-with-no-flush-caught-by-page-protection-tex_dirty_upload).
+- **Graphics-quality presets** (`ue_quality.tsv`, `ue_quality_app_pool`, `depth_mode`, current): [Graphics quality](#graphics-quality), [Raising an Unreal game's graphics quality](../../../docs/agents/07-quality.md).
 
 ## Open
 

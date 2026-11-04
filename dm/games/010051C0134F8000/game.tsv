@@ -50,3 +50,11 @@ tex_dirty_upload	on
 # 60 fps (30 on the Switch): the cap is rhi.SyncInterval 2 (DefaultEngine.ini) and t.MaxFPS 30 (set at run time; bUseFixedFrameRate=False), which hle_fpslock.c rewrites
 # for this build; movement and voice triggers keep their speed (delta time). DM_FPS_TARGET=30 in the settings window keeps the game's own rate
 fps_target	60
+
+# ---- Graphics quality ----
+# The application pool reported under a preset (ue_quality.tsv): Unreal's allocator budgets against it, and the Switch's 3.21 GB does not fit 4K targets (docs/agents/07-quality.md)
+ue_quality_app_pool	0x200000000
+
+# ---- Pipeline bases ----
+# The game sets near = 0, so the app's offline archive takes the main0_z vertex entries; without this key its bases were made for near = -w and could not stand in for a draw, and the device had to prebuild them itself
+depth_mode	zero

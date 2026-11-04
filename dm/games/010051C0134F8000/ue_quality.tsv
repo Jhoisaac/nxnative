@@ -1,0 +1,53 @@
+# Graphics-quality presets for an Unreal game, chosen in the settings window (DM_UE_QUALITY; dm/tools/ue_quality.py builds one replacement pak per preset, dm/host/hle_fs.c mounts it).
+# The game reads its device-profile console variables from cooked .ini files in a pak at boot, so a preset is the same ini with edits, in a pak named <stem of the pak holding the ini>_99_P.pak
+# beside that pak (Unreal mounts _P paks with priority). Columns, separated by tabs: preset (the setting's value; "off" has no rows), ini path in the pak, section (without brackets), key, value.
+#   key = a console variable: the section's +CVars=<key>=<old> line is replaced, or +CVars=<key>=<value> is added at the end of the section
+#   key = TextureLODGroups: value is Field=Value[,Field=Value...]; every +TextureLODGroups=(...) line of the section gets those fields replaced
+#   a field written Old>New (MinMagFilter=linear>aniso) is replaced only where it is Old: the point-filtered groups (8- and 16-bit data, 2D pixels) stay point
+# A row that matches no ini, no section, or (TextureLODGroups) no line stops the build. Handheld (the Switch DeviceProfile) keeps the Switch values; only SwitchConsole changes resolution.
+high	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.setres	1920x1080
+high	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.DynamicRes.OperationMode	0
+high	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.ScreenPercentage	100.00
+high	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.MaxAnisotropy	8
+high	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.Streaming.PoolSize	1600
+high	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	MinMagFilter=linear>aniso,MipFilter=point>linear
+veryhigh	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.setres	2560x1440
+veryhigh	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.DynamicRes.OperationMode	0
+veryhigh	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.ScreenPercentage	100.00
+veryhigh	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.MaxAnisotropy	8
+veryhigh	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.Streaming.PoolSize	1600
+veryhigh	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	MinMagFilter=linear>aniso,MipFilter=point>linear
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.setres	3840x2160
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.DynamicRes.OperationMode	0
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.MaxAnisotropy	16
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.Streaming.PoolSize	3000
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.ScreenPercentage	70
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.Shadow.MaxResolution	2048
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.Shadow.MaxCSMResolution	2048
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.Shadow.CSM.MaxCascades	4
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.Shadow.DistanceScale	1
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.Shadow.RadiusThreshold	0.03
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.ForceLODShadow	-1
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.AllowLandscapeShadows	1
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.BloomQuality	5
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.LensFlareQuality	2
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.LightShaftQuality	1
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.Tonemapper.Quality	5
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.Upscale.Quality	3
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.ViewDistanceScale	2
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.StaticMeshLODDistanceScale	0.5
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.LandscapeLODDistributionScale	2
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	foliage.LODDistanceScale	2
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	grass.DensityScale	1
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	foliage.DensityScale	1
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.AmbientOcclusionLevels	-1
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.AmbientOcclusionMaxQuality	100
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.AmbientOcclusionRadiusScale	1.0
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.AmbientOcclusionMipLevelFactor	0.4
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.TranslucencyLightingVolumeDim	48
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.DetailMode	2
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.ParticleLightQuality	2
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.RefractionQuality	2
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	r.EmitterSpawnRateScale	1
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	MinMagFilter=linear>aniso,MipFilter=point>linear,LODBias=2>0
+max	AT/Config/Switch/SwitchDeviceProfiles.ini	Switch DeviceProfile	TextureLODGroups	LODBias=1>0
